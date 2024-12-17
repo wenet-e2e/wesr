@@ -271,7 +271,8 @@ def main():
         model_max_length=training_args.model_max_length,
         padding_side="right",
     )
-    tokenizer.pad_token = tokenizer.eos_token  # for LLaMa
+    if 'llama' in model_args.llm_model_name_or_path:
+        tokenizer.pad_token = '<|finetune_right_pad_id|>'
 
     print("Loading data...")
     train_dataset = SpeechDataset(data_args.data_path,
