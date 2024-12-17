@@ -36,7 +36,7 @@ def main():
         eos_token_id = tokenizer.convert_tokens_to_ids(
             ['<|endoftext|>', '<|im_end|>'])
     else:
-        tokenizer.pad_token = tokenizer.eos_token  # for LLaMa
+        tokenizer.pad_token = '<|finetune_right_pad_id|>'
         eos_token_id = tokenizer.convert_tokens_to_ids(
             ['<|end_of_text|>', '<|eot_id|>'])
     print('eos_token_id', eos_token_id)
