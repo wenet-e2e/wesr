@@ -9,12 +9,8 @@ import transformers
 from transformers import AutoTokenizer
 from accelerate import Accelerator
 
-from train import (
-    init_model,
-    ModelArguments,
-    DataArguments,
-    SpeechDataset,
-)
+from dataset import SpeechDataset, DataArguments
+from speech_llm import init_model, ModelArguments
 
 
 @dataclass
