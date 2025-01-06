@@ -1,5 +1,6 @@
 # Copyright (c) 2025 Binbin Zhang(binbzha@qq.com)
 
+import math
 import json
 from dataclasses import dataclass, field
 from typing import Dict
@@ -54,6 +55,8 @@ class SpeechDataset(Dataset):
         if sample_rate != 16000:
             audio = torchaudio.transforms.Resample(sample_rate, 16000)(audio)
         audio = audio[0]  # get the first channel
+        # 10 frames per second after downsample
+        mel_len = math.ceil(float(audio.size(0)) / 16000 * 10)
         audio = whisper.pad_or_trim(audio)
         mel = whisper.log_mel_spectrogram(audio)
         ids_audio = [0] * int(mel.shape[1] / 10)  # 10x downsample
@@ -78,9 +81,22 @@ class SpeechDataset(Dataset):
         target_ids = torch.tensor(tgt, dtype=torch.int)
         target_ids[target_ids == self.tokenizer.pad_token_id] = IGNORE_TOKEN_ID
         attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
-        return {
+
+        ctc_tokens = self.tokenizer(msg['txt'],
+                                    padding='max_length',
+                                    max_length=100,
+                                    truncation=True,
+                                    return_tensors='pt')
+        ctc_ids = ctc_tokens['input_ids'][0]
+        ctc_ids_len = ctc_tokens['attention_mask'].sum().item()
+        ret = {
             'input_ids': input_ids,
             'labels': target_ids,
             'attention_mask': attention_mask,
             'mel': mel,
+            'mel_len': mel_len,
         }
+        if not self.inference:
+            ret['ctc_ids'] = ctc_ids
+            ret['ctc_ids_len'] = ctc_ids_len
+        return ret

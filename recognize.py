@@ -51,6 +51,9 @@ def main():
             generated_ids = model.generate(**item,
                                            eos_token_id=eos_token_id,
                                            decode_config=decode_args)
+            # generated_ids = model.decode_ctc(**item,
+            #                                  eos_token_id=eos_token_id,
+            #                                  decode_config=decode_args)
             text = tokenizer.batch_decode(generated_ids,
                                           skip_special_tokens=True)
             print(text)
