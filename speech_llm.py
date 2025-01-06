@@ -56,6 +56,18 @@ def ctc_reduce(hyp, blank_id: int = 0):
     return new_hyp
 
 
+def ctc_reduce(hyp, blank_id: int = 0):
+    new_hyp = []
+    cur = 0
+    while cur < len(hyp):
+        if hyp[cur] != blank_id:
+            new_hyp.append(hyp[cur])
+        prev = cur
+        while cur < len(hyp) and hyp[cur] == hyp[prev]:
+            cur += 1
+    return new_hyp
+
+
 class ProjectorCov1d(nn.Module):
 
     def __init__(self, config, encoder_dim, llm_dim):
