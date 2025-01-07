@@ -85,7 +85,6 @@ class SpeechLLM(PreTrainedModel):
             self._keys_to_ignore_on_save.add('llm.' + k)
         for k in self.encoder.state_dict().keys():
             self._keys_to_ignore_on_save.add('encoder.' + k)
-        self.ctc_linear = nn.Linear(config.hidden_size, config.vocab_size)
         # Use bos_token_id as CTC blank id
         self.ctc_loss = nn.CTCLoss(config.bos_token_id,
                                    reduction='mean',
@@ -115,7 +114,9 @@ class SpeechLLM(PreTrainedModel):
         ctc_ids_len: torch.LongTensor = None,
     ):
         inputs_embeds, speech_proj = self.get_input_embedding(input_ids, mel)
-        ctc_act = self.ctc_linear(speech_proj)
+        # Tie CTC linear transforme and input embedding weight
+        ctc_linear = self.llm.get_input_embeddings().weight
+        ctc_act = torch.matmul(speech_proj, ctc_linear.T)
         ctc_act = ctc_act.transpose(0, 1)
         ctc_act = ctc_act.log_softmax(2)
         with torch.cuda.amp.autocast(enabled=False):
@@ -164,7 +165,9 @@ class SpeechLLM(PreTrainedModel):
         decode_config=None,
     ):
         _, speech_proj = self.get_input_embedding(input_ids, mel)
-        ctc_act = self.ctc_linear(speech_proj)  # (B, T, D)
+        # Tie CTC linear transforme and input embedding weight
+        ctc_linear = self.llm.get_input_embeddings().weight
+        ctc_act = torch.matmul(speech_proj, ctc_linear.T)
         ctc_probs = ctc_act.log_softmax(2)
         batch_size = ctc_probs.size(0)
         results = []
@@ -179,10 +182,6 @@ class SpeechLLM(PreTrainedModel):
 
     def freeze_encoder(self):
         freeze_model(self.encoder)
-
-    def copy_llm_embedding_weight(self):
-        embedding_weights = self.llm.get_input_embeddings().weight
-        self.ctc_linear.weight.copy_(embedding_weights)
 
     def freeze_llm(self):
         freeze_model(self.llm)
@@ -209,8 +208,6 @@ def init_model(model_args):
     total_params = sum(p.numel() for p in projector.parameters())
     print('Projector total params: {:.2f}M'.format(total_params / 1024 / 1024))
     model = SpeechLLM(config, llm_model, encoder, projector)
-    total_params = sum(p.numel() for p in model.ctc_linear.parameters())
-    print('CTC total params: {:.2f}M'.format(total_params / 1024 / 1024))
     if model_args.projector_model_path is not None:
         model.load_projector(model_args.projector_model_path)
     return model
