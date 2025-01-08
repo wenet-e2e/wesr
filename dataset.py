@@ -8,6 +8,7 @@ from typing import Dict
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 import torch
+import torch.nn.functional as F
 import torchaudio
 import transformers
 import whisper
@@ -30,7 +31,7 @@ class SpeechDataset(Dataset):
         self,
         data_path,
         tokenizer: transformers.PreTrainedTokenizer,
-        config,
+        config,  # model config
         inference: bool = False,
     ):
         super(SpeechDataset, self).__init__()
@@ -49,16 +50,32 @@ class SpeechDataset(Dataset):
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         IGNORE_TOKEN_ID = LabelSmoother.ignore_index
         msg = self.raw_data[i]
-        # load audio and pad/trim it to fit 30 seconds
         audio, sample_rate = torchaudio.load(msg['wav'])
         if sample_rate != 16000:
             audio = torchaudio.transforms.Resample(sample_rate, 16000)(audio)
-        audio = audio[0]  # get the first channel
-        # 10 frames per second after downsample
-        mel_len = math.ceil(
-            float(audio.size(0)) / 16000 * self.config.frames_per_second)
-        audio = whisper.pad_or_trim(audio)
-        mel = whisper.log_mel_spectrogram(audio)
+        if self.config.encoder_type == 'whisper':
+            mel_len = math.ceil(
+                float(audio.size(1)) / 16000 * self.config.frames_per_second)
+            audio = whisper.pad_or_trim(audio[0])
+            mel = whisper.log_mel_spectrogram(audio)
+        else:
+            # Note: We use 16-bit quantization by default in WeNet.
+            audio = audio * (1 << 15)
+            mel = torchaudio.compliance.kaldi.fbank(audio,
+                                                    num_mel_bins=80,
+                                                    frame_length=25,
+                                                    frame_shift=10,
+                                                    dither=0.0,
+                                                    energy_floor=0.0,
+                                                    sample_frequency=16000)
+            mel = mel.transpose(0, 1)  # (80, T)
+            if mel.size(1) < self.config.max_mel_size:
+                mel_len = mel.size(1)
+                mel = F.pad(mel, (0, self.config.max_mel_size - mel.size(1)),
+                            value=0.0)
+            else:  # hard truncation
+                mel_len = self.config.max_mel_size
+                mel = mel[:, :self.config.max_mel_size]
         ids_audio = [0] * self.config.max_speech_token_size
         tgt_audio = [IGNORE_TOKEN_ID] * len(ids_audio)
         chat = [{"role": "user", "content": "Transcribe the speech"}]

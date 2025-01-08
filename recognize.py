@@ -38,7 +38,8 @@ def main():
             ['<|end_of_text|>', '<|eot_id|>'])
     print('eos_token_id', eos_token_id)
     test_dataset = SpeechDataset(data_args.data_path,
-                                 tokenizer=tokenizer,
+                                 tokenizer,
+                                 model_args,
                                  inference=True)
     data_loader = DataLoader(test_dataset, batch_size=decode_args.batch_size)
     if torch.cuda.is_available():
@@ -60,6 +61,7 @@ def main():
                                           skip_special_tokens=True)
             print(text)
             for t in text:
+                t = t.replace('\n', ' ')
                 fid.write(t + '\n')
             sys.stdout.flush()
     fid.close()
