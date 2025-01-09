@@ -30,7 +30,7 @@ def main():
         training_args,
     ) = parser.parse_args_into_dataclasses()
 
-    model = init_model(model_args)
+    model, n_mels = init_model(model_args)
     model.freeze_llm()
     model.freeze_encoder()
 
@@ -48,11 +48,13 @@ def main():
     print("Loading data...")
     train_dataset = SpeechDataset(data_args.data_path,
                                   tokenizer=tokenizer,
-                                  max_len=training_args.model_max_length)
+                                  max_len=training_args.model_max_length,
+                                  n_mels=n_mels)
     if data_args.eval_data_path:
         eval_dataset = SpeechDataset(data_args.eval_data_path,
                                      tokenizer=tokenizer,
-                                     max_len=training_args.model_max_length)
+                                     max_len=training_args.model_max_length,
+                                     n_mels=n_mels)
     else:
         eval_dataset = None
     # Start trainer
