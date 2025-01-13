@@ -1,4 +1,5 @@
 # Copyright (c) 2025 Binbin Zhang(binbzha@qq.com)
+
 import math
 from typing import Optional
 from dataclasses import dataclass, field
@@ -6,8 +7,10 @@ from dataclasses import dataclass, field
 import safetensors
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from transformers import AutoModelForCausalLM, PreTrainedModel
+import wenet
 import whisper
 
 
@@ -15,6 +18,11 @@ import whisper
 class ModelArguments:
     llm_model_name_or_path: Optional[str] = field(default="Qwen/Qwen2-7B")
     whisper_model_name_or_path: Optional[str] = field(default="tiny")
+    wenet_model_name_or_path: Optional[str] = field(default="")
+    encoder_type: str = field(
+        default="whisper",
+        metadata={"help": "encoder type, whisper or wenet"},
+    )
     encoder_ds_rate: int = 2
     encoder_projector_ds_rate: int = 5
     projector_hidden_size: int = 2048
@@ -115,15 +123,25 @@ class SpeechLLM(PreTrainedModel):
         self.blank_id = config.bos_token_id
         self.model_args = model_args
 
-    def get_input_embedding(self, input_ids, mel):
-        # whisper + projector, 10x downsample, there is 300 outputs of 30s.
-        speech_size = 300
-        speech_emb = self.encoder.embed_audio(mel)  # (b, n_mel, 1500)
-        # projector, x 5x downsample = 300
-        speech_proj = self.projector(speech_emb)  # (b, x, 300)
+    def get_input_embedding(self, input_ids, mel, mel_len):
+        max_speech_size = self.model_args.max_speech_token_size
+        if self.model_args.encoder_type == 'whisper':
+            speech_emb = self.encoder.embed_audio(mel)  # (b, n_mel, 1500)
+            speech_proj = self.projector(speech_emb)
+        else:
+            mel = mel.transpose(1, 2)
+            # mask (B, 1, T)
+            speech_emb, mask = self.encoder._forward_encoder(mel, mel_len)
+            speech_emb = speech_emb.masked_fill(~mask.transpose(1, 2), 0.0)
+            # Note: The downsampling strategy in wenet discards frames that
+            # are not enough for an output, so we need to pad the output to
+            # a fixed length.
+            speech_proj = self.projector(speech_emb)
+            pad_size = max_speech_size - speech_proj.size(1)
+            speech_proj = F.pad(speech_proj, (0, 0, 0, pad_size), value=0.0)
         text_emb = self.llm.get_input_embeddings()(input_ids)
-        inputs_embeds = torch.cat((speech_proj, text_emb[:, speech_size:, :]),
-                                  dim=1)
+        inputs_embeds = torch.cat(
+            (speech_proj, text_emb[:, max_speech_size:, :]), dim=1)
         return inputs_embeds, speech_proj
 
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -137,7 +155,8 @@ class SpeechLLM(PreTrainedModel):
         ctc_ids: torch.LongTensor = None,
         ctc_ids_len: torch.LongTensor = None,
     ):
-        inputs_embeds, speech_proj = self.get_input_embedding(input_ids, mel)
+        inputs_embeds, speech_proj = self.get_input_embedding(
+            input_ids, mel, mel_len)
         # Tie CTC linear transforme and input embedding weight
         ctc_linear = self.llm.get_input_embeddings().weight
         ctc_act = torch.matmul(speech_proj, ctc_linear.T)
@@ -166,7 +185,7 @@ class SpeechLLM(PreTrainedModel):
         eos_token_id=None,
         decode_config=None,
     ):
-        inputs_embeds, _ = self.get_input_embedding(input_ids, mel)
+        inputs_embeds, _ = self.get_input_embedding(input_ids, mel, mel_len)
         model_outputs = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -189,15 +208,16 @@ class SpeechLLM(PreTrainedModel):
         eos_token_id=None,
         decode_config=None,
     ):
-        _, speech_proj = self.get_input_embedding(input_ids, mel)
+        _, speech_proj = self.get_input_embedding(input_ids, mel, mel_len)
         # Tie CTC linear transforme and input embedding weight
         ctc_linear = self.llm.get_input_embeddings().weight
         ctc_act = torch.matmul(speech_proj, ctc_linear.T)
         ctc_probs = ctc_act.log_softmax(2)
+        prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
         batch_size = ctc_probs.size(0)
         results = []
         for i in range(batch_size):
-            top1 = ctc_probs[i][:mel_len[i], :].argmax(dim=1)
+            top1 = ctc_probs[i][:prob_len[i], :].argmax(dim=1)
             hyp = ctc_reduce(top1.tolist(), self.blank_id)
             results.append(hyp)
         return results
@@ -207,6 +227,7 @@ class SpeechLLM(PreTrainedModel):
 
     def freeze_encoder(self):
         freeze_model(self.encoder)
+        self.encoder.eval()
 
     def freeze_llm(self):
         freeze_model(self.llm)
@@ -217,7 +238,15 @@ class SpeechLLM(PreTrainedModel):
 
 
 def init_model(model_args):
-    encoder = whisper.load_model(model_args.whisper_model_name_or_path)
+    if model_args.encoder_type == "whisper":
+        encoder = whisper.load_model(model_args.whisper_model_name_or_path)
+    elif model_args.encoder_type == "wenet":
+        encoder = wenet.load_model_pt(model_args.wenet_model_name_or_path)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        encoder = encoder.to(device)
+    else:
+        raise ValueError(f"Unexpected encoder type {model_args.encoder_type}")
+
     # Load llm model and tokenizer
     config = transformers.AutoConfig.from_pretrained(
         model_args.llm_model_name_or_path)
@@ -227,7 +256,10 @@ def init_model(model_args):
         config=config,
         torch_dtype='auto',
     )
-    encoder_dim = encoder.dims.n_audio_state
+    if model_args.encoder_type == "whisper":
+        encoder_dim = encoder.dims.n_audio_state
+    else:
+        encoder_dim = encoder.encoder.output_size()
     llm_dim = config.hidden_size
     projector = ProjectorCov1d(model_args, encoder_dim, llm_dim)
     total_params = sum(p.numel() for p in projector.parameters())
