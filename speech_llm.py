@@ -125,7 +125,7 @@ class SpeechLLM(PreTrainedModel):
         self.blank_id = config.bos_token_id
         self.model_args = model_args
 
-    def get_input_embedding(self, input_ids, mel, mel_len):
+    def get_speech_embeddings(self, mel, mel_len):
         max_speech_size = self.model_args.max_speech_token_size
         if self.model_args.encoder_type == 'whisper':
             speech_emb = self.encoder.embed_audio(mel)  # (b, n_mel, 1500)
@@ -141,10 +141,7 @@ class SpeechLLM(PreTrainedModel):
             speech_proj = self.projector(speech_emb)
             pad_size = max_speech_size - speech_proj.size(1)
             speech_proj = F.pad(speech_proj, (0, 0, 0, pad_size), value=0.0)
-        text_emb = self.llm.get_input_embeddings()(input_ids)
-        inputs_embeds = torch.cat(
-            (speech_proj, text_emb[:, max_speech_size:, :]), dim=1)
-        return inputs_embeds, speech_proj
+        return speech_proj
 
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def forward(
@@ -157,8 +154,11 @@ class SpeechLLM(PreTrainedModel):
         ctc_ids: torch.LongTensor = None,
         ctc_ids_len: torch.LongTensor = None,
     ):
-        inputs_embeds, speech_proj = self.get_input_embedding(
-            input_ids, mel, mel_len)
+        max_speech_size = self.model_args.max_speech_token_size
+        text_emb = self.llm.get_input_embeddings()(input_ids)
+        speech_emb = self.get_speech_embeddings(mel, mel_len)
+        inputs_embeds = torch.cat(
+            (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
         out = self.llm(inputs_embeds=inputs_embeds,
                        attention_mask=attention_mask,
                        labels=labels)
@@ -166,7 +166,7 @@ class SpeechLLM(PreTrainedModel):
         if ctc_weight > 0:
             # Tie CTC linear transforme and input embedding weight
             ctc_linear = self.llm.get_input_embeddings().weight
-            ctc_act = torch.matmul(speech_proj, ctc_linear.T)
+            ctc_act = torch.matmul(speech_emb, ctc_linear.T)
             ctc_act = ctc_act.transpose(0, 1)
             ctc_prob = ctc_act.log_softmax(2)
             prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
@@ -187,7 +187,11 @@ class SpeechLLM(PreTrainedModel):
         eos_token_id=None,
         decode_config=None,
     ):
-        inputs_embeds, _ = self.get_input_embedding(input_ids, mel, mel_len)
+        max_speech_size = self.model_args.max_speech_token_size
+        text_emb = self.llm.get_input_embeddings()(input_ids)
+        speech_emb = self.get_speech_embeddings(mel, mel_len)
+        inputs_embeds = torch.cat(
+            (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
         model_outputs = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -210,10 +214,10 @@ class SpeechLLM(PreTrainedModel):
         eos_token_id=None,
         decode_config=None,
     ):
-        _, speech_proj = self.get_input_embedding(input_ids, mel, mel_len)
+        speech_emb = self.get_speech_embeddings(mel, mel_len)
         # Tie CTC linear transforme and input embedding weight
         ctc_linear = self.llm.get_input_embeddings().weight
-        ctc_act = torch.matmul(speech_proj, ctc_linear.T)
+        ctc_act = torch.matmul(speech_emb, ctc_linear.T)
         ctc_probs = ctc_act.log_softmax(2)
         prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
         batch_size = ctc_probs.size(0)
