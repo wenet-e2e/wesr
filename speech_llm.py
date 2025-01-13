@@ -33,6 +33,8 @@ class ModelArguments:
     )
     max_speech_seconds: int = 30
     frames_per_second: int = 100
+    # CTC related, if ctc_weight > 0, CTC loss is applied in training.
+    ctc_weight: Optional[float] = field(default=0.0)
 
     @property
     def ds_rate(self):
@@ -157,21 +159,21 @@ class SpeechLLM(PreTrainedModel):
     ):
         inputs_embeds, speech_proj = self.get_input_embedding(
             input_ids, mel, mel_len)
-        # Tie CTC linear transforme and input embedding weight
-        ctc_linear = self.llm.get_input_embeddings().weight
-        ctc_act = torch.matmul(speech_proj, ctc_linear.T)
-        ctc_act = ctc_act.transpose(0, 1)
-        ctc_prob = ctc_act.log_softmax(2)
-        prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
-        with torch.cuda.amp.autocast(enabled=False):
-            closs = self.ctc_loss(ctc_prob.float(), ctc_ids, prob_len,
-                                  ctc_ids_len)
-        out = self.llm(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
-        out.loss = 0.9 * out.loss + 0.1 * closs
+        out = self.llm(inputs_embeds=inputs_embeds,
+                       attention_mask=attention_mask,
+                       labels=labels)
+        ctc_weight = self.model_args.ctc_weight
+        if ctc_weight > 0:
+            # Tie CTC linear transforme and input embedding weight
+            ctc_linear = self.llm.get_input_embeddings().weight
+            ctc_act = torch.matmul(speech_proj, ctc_linear.T)
+            ctc_act = ctc_act.transpose(0, 1)
+            ctc_prob = ctc_act.log_softmax(2)
+            prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
+            with torch.cuda.amp.autocast(enabled=False):
+                closs = self.ctc_loss(ctc_prob.float(), ctc_ids, prob_len,
+                                      ctc_ids_len)
+            out.loss = (1 - ctc_weight) * out.loss + ctc_weight * closs
         return out
 
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
