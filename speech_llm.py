@@ -214,7 +214,7 @@ class SpeechLLM(PreTrainedModel):
         eos_token_id=None,
         decode_config=None,
     ):
-        speech_emb = self.get_input_embedding(mel, mel_len)
+        speech_emb = self.get_speech_embeddings(mel, mel_len)
         # Tie CTC linear transforme and input embedding weight
         ctc_linear = self.llm.get_input_embeddings().weight
         ctc_act = torch.matmul(speech_emb, ctc_linear.T)
