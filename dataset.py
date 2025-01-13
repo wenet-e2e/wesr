@@ -30,13 +30,13 @@ class SpeechDataset(Dataset):
         self,
         data_path,
         tokenizer: transformers.PreTrainedTokenizer,
-        max_len: int = 512,
+        config,
         inference: bool = False,
     ):
         super(SpeechDataset, self).__init__()
         print("Formatting inputs...")
         self.tokenizer = tokenizer
-        self.max_len = max_len
+        self.config = config
         self.inference = inference
         self.raw_data = []
         with open(data_path, "r") as f:
@@ -50,16 +50,16 @@ class SpeechDataset(Dataset):
         IGNORE_TOKEN_ID = LabelSmoother.ignore_index
         msg = self.raw_data[i]
         # load audio and pad/trim it to fit 30 seconds
-        speech_len = 300
         audio, sample_rate = torchaudio.load(msg['wav'])
         if sample_rate != 16000:
             audio = torchaudio.transforms.Resample(sample_rate, 16000)(audio)
         audio = audio[0]  # get the first channel
         # 10 frames per second after downsample
-        mel_len = math.ceil(float(audio.size(0)) / 16000 * 10)
+        mel_len = math.ceil(
+            float(audio.size(0)) / 16000 * self.config.frames_per_second)
         audio = whisper.pad_or_trim(audio)
         mel = whisper.log_mel_spectrogram(audio)
-        ids_audio = [0] * int(mel.shape[1] / 10)  # 10x downsample
+        ids_audio = [0] * self.config.max_speech_token_size
         tgt_audio = [IGNORE_TOKEN_ID] * len(ids_audio)
         chat = [{"role": "user", "content": "Transcribe the speech"}]
         if self.inference:
@@ -68,7 +68,8 @@ class SpeechDataset(Dataset):
             chat.append({"role": "assistant", "content": msg['txt']})
             kwargs = {
                 'padding': 'max_length',
-                'max_length': self.max_len - speech_len,
+                'max_length': self.config.model_max_length -
+                self.config.max_speech_token_size,
                 'truncation': True,
                 'add_generation_prompt': False,
             }

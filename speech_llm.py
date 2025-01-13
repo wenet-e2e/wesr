@@ -1,5 +1,5 @@
 # Copyright (c) 2025 Binbin Zhang(binbzha@qq.com)
-
+import math
 from typing import Optional
 from dataclasses import dataclass, field
 
@@ -19,6 +19,29 @@ class ModelArguments:
     encoder_projector_ds_rate: int = 5
     projector_hidden_size: int = 2048
     projector_model_path: Optional[str] = field(default=None)
+    model_max_length: int = field(
+        default=8192,
+        metadata={"help": "Maximum sequence length"},
+    )
+    max_speech_seconds: int = 30
+    frames_per_second: int = 100
+
+    @property
+    def ds_rate(self):
+        return self.encoder_ds_rate * self.encoder_projector_ds_rate
+
+    @property
+    def speech_tokens_per_second(self):
+        return self.frames_per_second / self.ds_rate
+
+    @property
+    def max_speech_token_size(self):
+        return math.ceil(self.max_speech_seconds *
+                         self.speech_tokens_per_second)
+
+    @property
+    def max_mel_size(self):
+        return self.max_speech_seconds * self.frames_per_second
 
 
 def ctc_reduce(hyp, blank_id: int = 0):
@@ -69,13 +92,13 @@ class SpeechLLM(PreTrainedModel):
 
     def __init__(
         self,
-        config,
         llm: nn.Module,
         encoder: nn.Module,
         projector: nn.Module,
+        config,
+        model_args: ModelArguments,
     ):
         super().__init__(config)
-        self.config = config  # copy llm's config
         self.llm = llm
         self.encoder = encoder
         self.projector = projector
@@ -90,6 +113,7 @@ class SpeechLLM(PreTrainedModel):
                                    reduction='mean',
                                    zero_infinity=True)
         self.blank_id = config.bos_token_id
+        self.model_args = model_args
 
     def get_input_embedding(self, input_ids, mel):
         # whisper + projector, 10x downsample, there is 300 outputs of 30s.
@@ -118,9 +142,10 @@ class SpeechLLM(PreTrainedModel):
         ctc_linear = self.llm.get_input_embeddings().weight
         ctc_act = torch.matmul(speech_proj, ctc_linear.T)
         ctc_act = ctc_act.transpose(0, 1)
-        ctc_act = ctc_act.log_softmax(2)
+        ctc_prob = ctc_act.log_softmax(2)
+        prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
         with torch.cuda.amp.autocast(enabled=False):
-            closs = self.ctc_loss(ctc_act.float(), ctc_ids, mel_len,
+            closs = self.ctc_loss(ctc_prob.float(), ctc_ids, prob_len,
                                   ctc_ids_len)
         out = self.llm(
             inputs_embeds=inputs_embeds,
@@ -207,7 +232,7 @@ def init_model(model_args):
     projector = ProjectorCov1d(model_args, encoder_dim, llm_dim)
     total_params = sum(p.numel() for p in projector.parameters())
     print('Projector total params: {:.2f}M'.format(total_params / 1024 / 1024))
-    model = SpeechLLM(config, llm_model, encoder, projector)
+    model = SpeechLLM(llm_model, encoder, projector, config, model_args)
     if model_args.projector_model_path is not None:
         model.load_projector(model_args.projector_model_path)
     return model
