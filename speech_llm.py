@@ -8,10 +8,13 @@ import safetensors
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchaudio
 import transformers
 from transformers import AutoModelForCausalLM, PreTrainedModel
 import wenet
 import whisper
+
+from utils import ctc_reduce, ctc_peak_time, lists_to_tensor
 
 
 @dataclass
@@ -35,6 +38,8 @@ class ModelArguments:
     frames_per_second: int = 100
     # CTC related, if ctc_weight > 0, CTC loss is applied in training.
     ctc_weight: Optional[float] = field(default=0.0)
+    ctc_reduce: Optional[bool] = field(default=False)
+    reduced_speech_token_per_second: int = 6
 
     @property
     def ds_rate(self):
@@ -52,18 +57,6 @@ class ModelArguments:
     @property
     def max_mel_size(self):
         return self.max_speech_seconds * self.frames_per_second
-
-
-def ctc_reduce(hyp, blank_id: int = 0):
-    new_hyp = []
-    cur = 0
-    while cur < len(hyp):
-        if hyp[cur] != blank_id:
-            new_hyp.append(hyp[cur])
-        prev = cur
-        while cur < len(hyp) and hyp[cur] == hyp[prev]:
-            cur += 1
-    return new_hyp
 
 
 class ProjectorCov1d(nn.Module):
@@ -143,6 +136,29 @@ class SpeechLLM(PreTrainedModel):
             speech_proj = F.pad(speech_proj, (0, 0, 0, pad_size), value=0.0)
         return speech_proj
 
+    def select_speech_embeddings(
+        self,
+        ctc_prob,
+        ctc_ids,
+        prob_len,
+        ctc_ids_len,
+        speech_emb,
+    ):
+        """ Select speech embeddings by force align
+        """
+        out_emb = torch.zeros_like(speech_emb)
+        batch_size = ctc_prob.size(0)
+        for i in range(batch_size):
+            # The current forced_align only supports batch_size==1.
+            alignment, _ = torchaudio.functional.forced_align(
+                ctc_prob[i, :prob_len[i], :].contiguous().unsqueeze(0),
+                ctc_ids[i, :ctc_ids_len[i]].contiguous().unsqueeze(0),
+                blank=self.blank_id)
+            peak_t = ctc_peak_time(alignment[0].tolist(), self.blank_id)
+            assert ctc_ids_len[i].item() == len(peak_t)
+            out_emb[i, :ctc_ids_len[i], :] = speech_emb[i, peak_t, :]
+        return out_emb
+
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def forward(
         self,
@@ -157,12 +173,8 @@ class SpeechLLM(PreTrainedModel):
         max_speech_size = self.model_args.max_speech_token_size
         text_emb = self.llm.get_input_embeddings()(input_ids)
         speech_emb = self.get_speech_embeddings(mel, mel_len)
-        inputs_embeds = torch.cat(
-            (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
-        out = self.llm(inputs_embeds=inputs_embeds,
-                       attention_mask=attention_mask,
-                       labels=labels)
         ctc_weight = self.model_args.ctc_weight
+        # Optional, add CTC loss
         if ctc_weight > 0:
             # Tie CTC linear transforme and input embedding weight
             ctc_linear = self.llm.get_input_embeddings().weight
@@ -173,6 +185,17 @@ class SpeechLLM(PreTrainedModel):
             with torch.cuda.amp.autocast(enabled=False):
                 closs = self.ctc_loss(ctc_prob.float(), ctc_ids, prob_len,
                                       ctc_ids_len)
+            # Optional, reduce sequence, rewrite speech embeddings
+            if self.model_args.ctc_reduce:
+                speech_emb = self.select_speech_embeddings(
+                    ctc_prob.transpose(0, 1), ctc_ids, prob_len, ctc_ids_len,
+                    speech_emb)
+        inputs_embeds = torch.cat(
+            (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
+        out = self.llm(inputs_embeds=inputs_embeds,
+                       attention_mask=attention_mask,
+                       labels=labels)
+        if ctc_weight > 0:
             out.loss = (1 - ctc_weight) * out.loss + ctc_weight * closs
         return out
 
@@ -190,6 +213,25 @@ class SpeechLLM(PreTrainedModel):
         max_speech_size = self.model_args.max_speech_token_size
         text_emb = self.llm.get_input_embeddings()(input_ids)
         speech_emb = self.get_speech_embeddings(mel, mel_len)
+        # Optional, appliy ctc_reduce
+        if self.model_args.ctc_reduce:
+            ctc_linear = self.llm.get_input_embeddings().weight
+            ctc_act = torch.matmul(speech_emb, ctc_linear.T)
+            ctc_probs = ctc_act.log_softmax(2)
+            prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
+            batch_size = ctc_probs.size(0)
+            results = []
+            for i in range(batch_size):
+                top1 = ctc_probs[i][:prob_len[i], :].argmax(dim=1)
+                hyp = ctc_reduce(top1.tolist(), self.blank_id)
+                results.append(hyp)
+            results_len = torch.tensor([len(l) for l in results],
+                                       dtype=torch.long,
+                                       device=mel.device)
+            results_ids = lists_to_tensor(results, device=mel.device)
+            speech_emb = self.select_speech_embeddings(ctc_probs, results_ids,
+                                                       prob_len, results_len,
+                                                       speech_emb)
         inputs_embeds = torch.cat(
             (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
         model_outputs = self.llm.generate(
@@ -226,6 +268,38 @@ class SpeechLLM(PreTrainedModel):
             top1 = ctc_probs[i][:prob_len[i], :].argmax(dim=1)
             hyp = ctc_reduce(top1.tolist(), self.blank_id)
             results.append(hyp)
+        return results
+
+    @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    def compute_similarity(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        mel: torch.LongTensor = None,
+        mel_len: torch.LongTensor = None,
+        ctc_ids: torch.LongTensor = None,
+        ctc_ids_len: torch.LongTensor = None,
+    ):
+        """ Compute text and speech embedding similarity
+        """
+        max_speech_size = self.model_args.max_speech_token_size
+        text_emb = self.llm.get_input_embeddings()(ctc_ids)
+        speech_emb = self.get_speech_embeddings(mel, mel_len)
+        ctc_linear = self.llm.get_input_embeddings().weight
+        ctc_act = torch.matmul(speech_emb, ctc_linear.T)
+        ctc_probs = ctc_act.log_softmax(2)
+        prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
+        speech_emb = self.select_speech_embeddings(ctc_probs, ctc_ids, prob_len,
+                                                   ctc_ids_len, speech_emb)
+        batch_size = ctc_ids.size(0)
+        results = []
+        for i in range(batch_size):
+            end = ctc_ids_len[i]
+            s = F.cosine_similarity(text_emb[i, :end, :],
+                                    speech_emb[i, :end, :],
+                                    dim=1)
+            results.append(s)
         return results
 
     def enable_input_require_grads(self):
