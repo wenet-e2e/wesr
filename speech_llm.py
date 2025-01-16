@@ -270,6 +270,38 @@ class SpeechLLM(PreTrainedModel):
             results.append(hyp)
         return results
 
+    @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    def compute_similarity(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        mel: torch.LongTensor = None,
+        mel_len: torch.LongTensor = None,
+        ctc_ids: torch.LongTensor = None,
+        ctc_ids_len: torch.LongTensor = None,
+    ):
+        """ Compute text and speech embedding similarity
+        """
+        max_speech_size = self.model_args.max_speech_token_size
+        text_emb = self.llm.get_input_embeddings()(ctc_ids)
+        speech_emb = self.get_speech_embeddings(mel, mel_len)
+        ctc_linear = self.llm.get_input_embeddings().weight
+        ctc_act = torch.matmul(speech_emb, ctc_linear.T)
+        ctc_probs = ctc_act.log_softmax(2)
+        prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
+        speech_emb = self.select_speech_embeddings(ctc_probs, ctc_ids, prob_len,
+                                                   ctc_ids_len, speech_emb)
+        batch_size = ctc_ids.size(0)
+        results = []
+        for i in range(batch_size):
+            end = ctc_ids_len[i]
+            s = F.cosine_similarity(text_emb[i, :end, :],
+                                    speech_emb[i, :end, :],
+                                    dim=1)
+            results.append(s)
+        return results
+
     def enable_input_require_grads(self):
         self.llm.enable_input_require_grads()
 
