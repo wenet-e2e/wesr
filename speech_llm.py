@@ -35,6 +35,8 @@ class ModelArguments:
     frames_per_second: int = 100
     # CTC related, if ctc_weight > 0, CTC loss is applied in training.
     ctc_weight: Optional[float] = field(default=0.0)
+    # For decode
+    decode_instruction: Optional[str] = field(default="")
 
     @property
     def ds_rate(self):
