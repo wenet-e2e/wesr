@@ -119,12 +119,12 @@ class SpeechDataset(Dataset):
         ctc_ids_len = ctc_tokens['attention_mask'].sum().item()
         ret = {
             'input_ids': input_ids,
-            'labels': target_ids,
             'attention_mask': attention_mask,
             'mel': mel,
             'mel_len': mel_len,
         }
         if not self.inference:
+            ret['labels'] = target_ids
             ret['ctc_ids'] = ctc_ids
             ret['ctc_ids_len'] = ctc_ids_len
         return ret
