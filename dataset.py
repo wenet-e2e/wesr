@@ -78,11 +78,21 @@ class SpeechDataset(Dataset):
                 mel = mel[:, :self.config.max_mel_size]
         ids_audio = [0] * self.config.max_speech_token_size
         tgt_audio = [IGNORE_TOKEN_ID] * len(ids_audio)
-        chat = [{"role": "user", "content": "Transcribe the speech"}]
+        if 'instruction' in msg:
+            instruction = msg['instruction']
+        elif self.inference and self.config.decode_instruction != '':
+            instruction = self.config.decode_instruction
+        else:
+            instruction = 'Transcribe the speech'
+        chat = [{"role": "user", "content": instruction}]
+        # `content`: the anwser acorrding to the audio and instruction
+        # `txt`: the transcription of the audio
+        # If there is no content, the default `content` is the same as `txt`.
+        content = msg['content'] if 'content' in msg else msg['txt']
         if self.inference:
             kwargs = {'add_generation_prompt': True}
         else:
-            chat.append({"role": "assistant", "content": msg['txt']})
+            chat.append({"role": "assistant", "content": content})
             kwargs = {
                 'padding': 'max_length',
                 'max_length': self.config.model_max_length -
