@@ -71,6 +71,16 @@ python recognize.py \
 ## Results
 
 ### LibriSpeech(TODO)
+| Exp | LLM        | Speech Encoder     | Projector     | test_clean | test_other  |
+|-----|------------|--------------------|---------------|------------|-------------|
+| 1   | LLaMA 3 8B | Whisper tiny 39M   | Conv1d 9.46M  | 7.62/6.29  | 18.50/17.59 |
+| 2   | LLaMA 3 8B | Whisper small 244M | Conv1d 12.32M | 6.09/3.90  | 11.65/10.00 |
+| 3   | LLaMA 3 8B | Whisper Large 1.5G | Conv1d 18.32M | 3.63/2.83  | 8.18/7.43   |
+
+The number before and after '/' represents the overall WER and the WER after filtering out hallucinations, respectively.
+We have observed that certain recognition results may exhibit the hallucination like
+"I apologize, but it appears that there is no speech to transcribe."
+
 
 ### AIShell
 
