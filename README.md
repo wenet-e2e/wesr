@@ -70,7 +70,7 @@ python recognize.py \
 
 ## Results
 
-### LibriSpeech(TODO)
+### LibriSpeech
 | Exp | LLM        | Speech Encoder     | Projector     | test_clean | test_other  |
 |-----|------------|--------------------|---------------|------------|-------------|
 | 1   | LLaMA 3 8B | Whisper tiny 39M   | Conv1d 9.46M  | 7.62/6.29  | 18.50/17.59 |
