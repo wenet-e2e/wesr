@@ -42,7 +42,14 @@ def main():
         tokenizer.pad_token = '<|finetune_right_pad_id|>'
 
     print("Loading data...")
-    train_dataset = SpeechDataset(data_args.data_path, tokenizer, model_args)
+    if data_args.data_type is None:
+        train_dataset = SpeechDataset(data_args.data_path, tokenizer,
+                                      model_args)
+    else:
+        from dataset_wenet import init_dataset
+        train_dataset = init_dataset(data_args.data_path, data_args.data_type,
+                                     data_args.configs_file, tokenizer,
+                                     model_args)
     if data_args.eval_data_path:
         eval_dataset = SpeechDataset(data_args.eval_data_path, tokenizer,
                                      model_args)

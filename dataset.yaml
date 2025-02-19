@@ -1,0 +1,41 @@
+dataset: asr
+dataset_conf:
+  batch_conf:
+    batch_size: 4
+    batch_type: static
+    # batch_type: dynamic
+    # max_frames_in_batch: 1000  #  18000
+  cycle: 1
+  feats_type: fbank
+  fbank_conf:
+    num_mel_bins: 80
+    frame_length: 25
+    frame_shift: 10
+    dither: 0.0
+  filter_conf:
+    max_length: 40960
+    min_length: 0
+    token_max_length: 200
+    token_min_length: 1
+  resample_conf:
+    resample_rate: 16000
+  shuffle: true
+  shuffle_conf:
+    shuffle_size: 1000
+  sort: true
+  sort_conf:
+    sort_size: 400
+  spec_aug: false  # true
+  spec_aug_conf:
+    max_f: 30
+    max_t: 50
+    num_f_mask: 2
+    num_t_mask: 2
+  spec_sub: false  # true
+  spec_sub_conf:
+    max_t: 30
+    num_t_sub: 3
+  spec_trim: false
+  spec_trim_conf:
+    max_t: 30
+  speed_perturb: false  #true

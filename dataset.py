@@ -22,6 +22,9 @@ class DataArguments:
         default=None, metadata={"help": "Path to the evaluation data."})
     test_data_path: str = field(default=None,
                                 metadata={"help": "Path to the test data."})
+    data_type: str = field(default=None, metadata={"help": "raw/shard"})
+    configs_file: str = field(default=None,
+                              metadata={"help": "Path to the dataset config"})
 
 
 class SpeechDataset(Dataset):
