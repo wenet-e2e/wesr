@@ -155,4 +155,4 @@ def init_model(model_args):
     model = SpeechLLM(config, llm_model, encoder, projector)
     if model_args.projector_model_path is not None:
         model.load_projector(model_args.projector_model_path)
-    return model
+    return model, encoder.dims.n_mels

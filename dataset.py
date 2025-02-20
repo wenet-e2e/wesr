@@ -31,12 +31,14 @@ class SpeechDataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         max_len: int = 512,
         inference: bool = False,
+        n_mels: int = 80,
     ):
         super(SpeechDataset, self).__init__()
         print("Formatting inputs...")
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.inference = inference
+        self.n_mels = n_mels
         self.raw_data = []
         with open(data_path, "r") as f:
             for line in f:
@@ -55,7 +57,7 @@ class SpeechDataset(Dataset):
             audio = torchaudio.transforms.Resample(sample_rate, 16000)(audio)
         audio = audio[0]  # get the first channel
         audio = whisper.pad_or_trim(audio)
-        mel = whisper.log_mel_spectrogram(audio)
+        mel = whisper.log_mel_spectrogram(audio, n_mels=self.n_mels)
         ids_audio = [0] * int(mel.shape[1] / 10)  # 10x downsample
         tgt_audio = [IGNORE_TOKEN_ID] * len(ids_audio)
         chat = [{"role": "user", "content": "Transcribe the speech"}]
