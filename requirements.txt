@@ -5,3 +5,4 @@ tensorboardX==2.6.2.2
 torch>=2.2.2
 torchaudio>=2.2.2
 transformers==4.43.3
+git+https://github.com/wenet-e2e/wenet.git
