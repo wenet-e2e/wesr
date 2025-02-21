@@ -30,7 +30,7 @@ The training data(train.json) and test data(test.jsonl) should be prepared as `j
 
 ``` bash
 torchrun --standalone --nnodes=1 --nproc_per_node=8 train.py \
-    --llm_model_name_or_path Qwen2-1.5B-Instruct \
+    --llm_model_name_or_path Qwen/Qwen2-1.5B-Instruct \
     --whisper_model_name_or_path tiny \
     --data_path train.jsonl \
     --bf16 True \
@@ -61,7 +61,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=8 train.py \
 
 ``` bash
 python recognize.py \
-    --llm_model_name_or_path Qwen2-1.5B-Instruct \
+    --llm_model_name_or_path Qwen/Qwen2-1.5B-Instruct \
     --whisper_model_name_or_path tiny \
     --projector_model_path Qwen-1.5B-Instruct-whisper-tiny/checkpoint-600/model.safetensors \
     --data_path test.jsonl \
