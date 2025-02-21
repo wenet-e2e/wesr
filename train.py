@@ -15,10 +15,6 @@ from speech_llm import init_model, ModelArguments
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adafactor")
-    model_max_length: int = field(
-        default=8192,
-        metadata={"help": "Maximum sequence length"},
-    )
 
 
 def main():
@@ -39,20 +35,17 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.llm_model_name_or_path,
-        model_max_length=training_args.model_max_length,
+        model_max_length=model_args.model_max_length,
         padding_side="right",
     )
     if 'llama' in model_args.llm_model_name_or_path:
         tokenizer.pad_token = '<|finetune_right_pad_id|>'
 
     print("Loading data...")
-    train_dataset = SpeechDataset(data_args.data_path,
-                                  tokenizer=tokenizer,
-                                  max_len=training_args.model_max_length)
+    train_dataset = SpeechDataset(data_args.data_path, tokenizer, model_args)
     if data_args.eval_data_path:
-        eval_dataset = SpeechDataset(data_args.eval_data_path,
-                                     tokenizer=tokenizer,
-                                     max_len=training_args.model_max_length)
+        eval_dataset = SpeechDataset(data_args.eval_data_path, tokenizer,
+                                     model_args)
     else:
         eval_dataset = None
     # Start trainer
