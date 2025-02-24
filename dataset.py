@@ -1,11 +1,12 @@
 # Copyright (c) 2025 Binbin Zhang(binbzha@qq.com)
 
 import math
+import random
 import json
 from dataclasses import dataclass, field
 from typing import Dict
 
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from transformers.trainer_pt_utils import LabelSmoother
 import torch
 import torchaudio
@@ -47,13 +48,11 @@ class CustomDataCollator:
 
         ids_audio = torch.cat([
             torch.tensor([0] * max_speech_token_size).unsqueeze(0)
-            for _ in batch
-        ], dim=0)
+            for _ in batch], dim=0)
         tgt_audio = torch.cat([
             torch.tensor(
                 [self.ignore_token_id] * max_speech_token_size).unsqueeze(0)
-            for _ in batch
-        ], dim=0)
+            for _ in batch], dim=0)
 
         ids_text = [x['label_ids'] for x in batch]
         padded_ids_text = pad_sequence(ids_text,
@@ -82,6 +81,55 @@ class CustomDataCollator:
             ret['ctc_ids_len'] = ctc_ids_len
             ret['labels'] = target_ids
         return ret
+
+
+class DynamicBatchSampler(Sampler):
+
+    def __init__(self, dataset, max_tokens_in_batch, ds_rate):
+        self.dataset = dataset
+        self.max_tokens_in_batch = max_tokens_in_batch
+        self.ds_rate = ds_rate
+        self.indices = list(range(len(dataset)))
+        random.shuffle(self.indices)
+        self._buffer = []
+        self.longest_ids_length = 0
+        self.longest_speech_token = 0
+
+    def dynamic_batch_window(self, sample, buffer_size):
+        assert isinstance(sample, dict)
+        assert 'mel' in sample
+        assert 'label_ids' in sample
+        new_speech_token = math.ceil(sample['mel'].size(1) / self.ds_rate)
+        self.longest_speech_token = max(self.longest_speech_token,
+                                        new_speech_token)
+        new_ids_length = sample['label_ids'].size(0)
+        self.longest_ids_length = max(self.longest_ids_length, new_ids_length)
+
+        tokens_after_padding = (self.longest_speech_token +
+                                self.longest_ids_length) * (buffer_size + 1)
+        if tokens_after_padding > self.max_tokens_in_batch:
+            self.longest_speech_token = new_speech_token
+            self.longest_ids_length = new_ids_length
+            return True
+        return False
+
+    def __iter__(self):
+        for idx in self.indices:
+            if not self.dynamic_batch_window(self.dataset[idx], len(
+                    self._buffer)):
+                self._buffer.append(idx)
+            else:
+                if len(self._buffer) > 0:
+                    yield self._buffer
+                del self._buffer
+                self._buffer = [idx]
+        if len(self._buffer) > 0:
+            yield self._buffer
+        del self._buffer
+        self._buffer = []
+
+    def __len__(self):
+        return len(self.indices)
 
 
 class SpeechDataset(Dataset):
@@ -145,9 +193,7 @@ class SpeechDataset(Dataset):
             kwargs = {'add_generation_prompt': True}
         else:
             chat.append({"role": "assistant", "content": content})
-            kwargs = {
-                'add_generation_prompt': False,
-            }
+            kwargs = {'add_generation_prompt': False}
         ids_text = self.tokenizer.apply_chat_template(chat,
                                                       tokenize=True,
                                                       **kwargs)

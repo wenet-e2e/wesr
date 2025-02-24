@@ -37,6 +37,7 @@ class ModelArguments:
     ctc_weight: Optional[float] = field(default=0.0)
     # For decode
     decode_instruction: Optional[str] = field(default="")
+    max_tokens_in_batch: Optional[int] = field(default=None)
 
     @property
     def ds_rate(self):
@@ -128,7 +129,6 @@ class SpeechLLM(PreTrainedModel):
         self.model_args = model_args
 
     def get_speech_embeddings(self, mel, mel_len, max_speech_size):
-        # max_speech_size = self.model_args.max_speech_token_size
         if self.model_args.encoder_type == 'whisper':
             speech_emb = self.encoder.embed_audio(mel)  # (b, n_mel, 1500)
             speech_proj = self.projector(speech_emb)

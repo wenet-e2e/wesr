@@ -5,16 +5,50 @@
 import pathlib
 from dataclasses import dataclass, field
 
+import torch
 import transformers
 from transformers import AutoTokenizer, Trainer
+from transformers.trainer_utils import seed_worker
+from torch.utils.data import Dataset, Sampler, DataLoader
 
-from dataset import DataArguments, SpeechDataset, CustomDataCollator
+from dataset import DataArguments, SpeechDataset, CustomDataCollator, DynamicBatchSampler
 from speech_llm import init_model, ModelArguments
 
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adafactor")
+
+
+class CustomTrainer(Trainer):
+
+    def __init__(self,
+                 batch_sampler: torch.utils.data.Sampler = None,
+                 *args,
+                 **kwargs):
+        self.batch_sampler = batch_sampler
+        super().__init__(*args, **kwargs)
+
+    def get_train_dataloader(self) -> DataLoader:
+        dataloader_params = {
+            "collate_fn": self.data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+        }
+        if not isinstance(self.train_dataset, torch.utils.data.IterableDataset):
+            if self.batch_sampler is not None:
+                dataloader_params["batch_sampler"] = self.batch_sampler
+            else:
+                dataloader_params["sampler"] = self._get_train_sampler()
+                dataloader_params["batch_size"] = self._train_batch_size
+                dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params[
+                "prefetch_factor"] = self.args.dataloader_prefetch_factor
+
+        return self.accelerator.prepare(
+            DataLoader(self.train_dataset, **dataloader_params))
 
 
 def main():
@@ -45,18 +79,25 @@ def main():
     train_dataset = SpeechDataset(data_args.data_path, tokenizer, model_args)
     data_collator = CustomDataCollator(ds_rate=model_args.ds_rate,
                                        pad_token_id=tokenizer.pad_token_id)
+    if model_args.max_tokens_in_batch is not None:
+        batch_sampler = DynamicBatchSampler(train_dataset,
+                                            model_args.max_tokens_in_batch,
+                                            model_args.ds_rate)
+    else:
+        batch_sampler = None
     if data_args.eval_data_path:
         eval_dataset = SpeechDataset(data_args.eval_data_path, tokenizer,
                                      model_args)
     else:
         eval_dataset = None
     # Start trainer
-    trainer = Trainer(model=model,
-                      tokenizer=tokenizer,
-                      args=training_args,
-                      train_dataset=train_dataset,
-                      eval_dataset=eval_dataset,
-                      data_collator=data_collator)
+    trainer = CustomTrainer(model=model,
+                            tokenizer=tokenizer,
+                            args=training_args,
+                            train_dataset=train_dataset,
+                            eval_dataset=eval_dataset,
+                            data_collator=data_collator,
+                            batch_sampler=batch_sampler)
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
