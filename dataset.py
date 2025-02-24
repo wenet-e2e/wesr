@@ -48,14 +48,12 @@ class CustomDataCollator:
         ids_audio = torch.cat([
             torch.tensor([0] * max_speech_token_size).unsqueeze(0)
             for _ in batch
-        ],
-                              dim=0)
+        ], dim=0)
         tgt_audio = torch.cat([
             torch.tensor(
                 [self.ignore_token_id] * max_speech_token_size).unsqueeze(0)
             for _ in batch
-        ],
-                              dim=0)
+        ], dim=0)
 
         ids_text = [x['label_ids'] for x in batch]
         padded_ids_text = pad_sequence(ids_text,
@@ -159,18 +157,12 @@ class SpeechDataset(Dataset):
         ctc_ids = ctc_tokens['input_ids'][0]
         ctc_ids_len = torch.tensor(ctc_tokens['attention_mask'].sum().item(),
                                    dtype=torch.int)
-        # print(ids_text)
         ret = {
             'label_ids': ids_text,
             'mel': mel,
             'mel_len': mel_len,
         }
-        # 'input_ids': input_ids,
-        # 'attention_mask': attention_mask,
         if not self.inference:
-            # ret['labels'] = target_ids
             ret['ctc_ids'] = ctc_ids
             ret['ctc_ids_len'] = ctc_ids_len
-        # print("ret keys: ", ret.keys())
-        # print(ret)
         return ret
