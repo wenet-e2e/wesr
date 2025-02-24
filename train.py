@@ -83,6 +83,7 @@ def main():
         batch_sampler = DynamicBatchSampler(train_dataset,
                                             model_args.max_tokens_in_batch,
                                             model_args.ds_rate)
+        training_args.accelerator_config.even_batches = False
     else:
         batch_sampler = None
     if data_args.eval_data_path:
