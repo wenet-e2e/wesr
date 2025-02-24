@@ -127,8 +127,8 @@ class SpeechLLM(PreTrainedModel):
         self.blank_id = config.bos_token_id
         self.model_args = model_args
 
-    def get_speech_embeddings(self, mel, mel_len):
-        max_speech_size = self.model_args.max_speech_token_size
+    def get_speech_embeddings(self, mel, mel_len, max_speech_size):
+        # max_speech_size = self.model_args.max_speech_token_size
         if self.model_args.encoder_type == 'whisper':
             speech_emb = self.encoder.embed_audio(mel)  # (b, n_mel, 1500)
             speech_proj = self.projector(speech_emb)
@@ -156,9 +156,9 @@ class SpeechLLM(PreTrainedModel):
         ctc_ids: torch.LongTensor = None,
         ctc_ids_len: torch.LongTensor = None,
     ):
-        max_speech_size = self.model_args.max_speech_token_size
+        max_speech_size = math.ceil(mel.shape[2] / self.model_args.ds_rate)
         text_emb = self.llm.get_input_embeddings()(input_ids)
-        speech_emb = self.get_speech_embeddings(mel, mel_len)
+        speech_emb = self.get_speech_embeddings(mel, mel_len, max_speech_size)
         inputs_embeds = torch.cat(
             (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
         out = self.llm(inputs_embeds=inputs_embeds,

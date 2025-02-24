@@ -8,10 +8,10 @@ from typing import Dict
 from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 import torch
-import torch.nn.functional as F
 import torchaudio
 import transformers
 import whisper
+from torch.nn.utils.rnn import pad_sequence
 
 
 @dataclass
@@ -22,6 +22,68 @@ class DataArguments:
         default=None, metadata={"help": "Path to the evaluation data."})
     test_data_path: str = field(default=None,
                                 metadata={"help": "Path to the test data."})
+
+
+@dataclass
+class CustomDataCollator:
+    ds_rate: int = 8
+    pad_token_id: int = -1
+    ignore_token_id: int = LabelSmoother.ignore_index
+
+    def __call__(self, batch):
+        """
+        [{"mel", "mel_len", "label_ids", "ctc_ids", "ctc_ids_len"},...]
+
+        """
+        assert isinstance(batch, list)
+        feats = [x['mel'] for x in batch]
+        feats_length = torch.tensor([x['mel'].shape[0] for x in batch],
+                                    dtype=torch.int64)
+        max_feats_length = torch.max(feats_length)
+
+        padded_feats = pad_sequence(feats, batch_first=True, padding_value=0)
+        padded_feats = padded_feats.transpose(1, 2)  # [80, T]
+        max_speech_token_size = math.ceil(max_feats_length / self.ds_rate)
+
+        ids_audio = torch.cat([
+            torch.tensor([0] * max_speech_token_size).unsqueeze(0)
+            for _ in batch
+        ],
+                              dim=0)
+        tgt_audio = torch.cat([
+            torch.tensor(
+                [self.ignore_token_id] * max_speech_token_size).unsqueeze(0)
+            for _ in batch
+        ],
+                              dim=0)
+
+        ids_text = [x['label_ids'] for x in batch]
+        padded_ids_text = pad_sequence(ids_text,
+                                       batch_first=True,
+                                       padding_value=self.pad_token_id)
+        input_ids = torch.cat([ids_audio, padded_ids_text], dim=1)
+        target_ids = torch.cat([tgt_audio, padded_ids_text], dim=1)
+
+        target_ids[target_ids == self.pad_token_id] = self.ignore_token_id
+        attention_mask = input_ids.ne(self.pad_token_id)
+
+        ret = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "mel": padded_feats,
+            "mel_len": feats_length,
+        }
+        if 'ctc_ids' in batch[0]:
+            ctc_ids = [x['ctc_ids'] for x in batch]
+            padded_ctc_ids = pad_sequence(ctc_ids,
+                                          batch_first=True,
+                                          padding_value=self.pad_token_id)
+            ctc_ids_len = torch.cat(
+                [x['ctc_ids_len'].unsqueeze(0) for x in batch], dim=0)
+            ret['ctc_ids'] = padded_ctc_ids
+            ret['ctc_ids_len'] = ctc_ids_len
+            ret['labels'] = target_ids
+        return ret
 
 
 class SpeechDataset(Dataset):
@@ -57,7 +119,8 @@ class SpeechDataset(Dataset):
             mel_len = math.ceil(
                 float(audio.size(1)) / 16000 * self.config.frames_per_second)
             audio = whisper.pad_or_trim(audio[0])
-            mel = whisper.log_mel_spectrogram(audio)
+            mel = whisper.log_mel_spectrogram(audio)  # [80, T]
+            mel = mel.transpose(0, 1)  # [T, 80]
         else:
             # Note: We use 16-bit quantization by default in WeNet.
             audio = audio * (1 << 15)
@@ -68,16 +131,7 @@ class SpeechDataset(Dataset):
                                                     dither=0.0,
                                                     energy_floor=0.0,
                                                     sample_frequency=16000)
-            mel = mel.transpose(0, 1)  # (80, T)
-            if mel.size(1) < self.config.max_mel_size:
-                mel_len = mel.size(1)
-                mel = F.pad(mel, (0, self.config.max_mel_size - mel.size(1)),
-                            value=0.0)
-            else:  # hard truncation
-                mel_len = self.config.max_mel_size
-                mel = mel[:, :self.config.max_mel_size]
-        ids_audio = [0] * self.config.max_speech_token_size
-        tgt_audio = [IGNORE_TOKEN_ID] * len(ids_audio)
+            mel_len = mel.size(0)
         if 'instruction' in msg:
             instruction = msg['instruction']
         elif self.inference and self.config.decode_instruction != '':
@@ -94,37 +148,29 @@ class SpeechDataset(Dataset):
         else:
             chat.append({"role": "assistant", "content": content})
             kwargs = {
-                'padding': 'max_length',
-                'max_length': self.config.model_max_length -
-                self.config.max_speech_token_size,
-                'truncation': True,
                 'add_generation_prompt': False,
             }
         ids_text = self.tokenizer.apply_chat_template(chat,
                                                       tokenize=True,
                                                       **kwargs)
-        ids = ids_audio + ids_text
-        tgt = tgt_audio + ids_text
-        input_ids = torch.tensor(ids, dtype=torch.int)
-        target_ids = torch.tensor(tgt, dtype=torch.int)
-        target_ids[target_ids == self.tokenizer.pad_token_id] = IGNORE_TOKEN_ID
-        attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
+        ids_text = torch.tensor(ids_text, dtype=torch.int)
 
-        ctc_tokens = self.tokenizer(msg['txt'],
-                                    padding='max_length',
-                                    max_length=100,
-                                    truncation=True,
-                                    return_tensors='pt')
+        ctc_tokens = self.tokenizer(msg['txt'], return_tensors='pt')
         ctc_ids = ctc_tokens['input_ids'][0]
-        ctc_ids_len = ctc_tokens['attention_mask'].sum().item()
+        ctc_ids_len = torch.tensor(ctc_tokens['attention_mask'].sum().item(),
+                                   dtype=torch.int)
+        # print(ids_text)
         ret = {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
+            'label_ids': ids_text,
             'mel': mel,
             'mel_len': mel_len,
         }
+        # 'input_ids': input_ids,
+        # 'attention_mask': attention_mask,
         if not self.inference:
-            ret['labels'] = target_ids
+            # ret['labels'] = target_ids
             ret['ctc_ids'] = ctc_ids
             ret['ctc_ids_len'] = ctc_ids_len
+        # print("ret keys: ", ret.keys())
+        # print(ret)
         return ret

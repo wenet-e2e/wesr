@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import transformers
 from transformers import AutoTokenizer, Trainer
 
-from dataset import DataArguments, SpeechDataset
+from dataset import DataArguments, SpeechDataset, CustomDataCollator
 from speech_llm import init_model, ModelArguments
 
 
@@ -43,6 +43,8 @@ def main():
 
     print("Loading data...")
     train_dataset = SpeechDataset(data_args.data_path, tokenizer, model_args)
+    data_collator = CustomDataCollator(ds_rate=model_args.ds_rate,
+                                       pad_token_id=tokenizer.pad_token_id)
     if data_args.eval_data_path:
         eval_dataset = SpeechDataset(data_args.eval_data_path, tokenizer,
                                      model_args)
@@ -53,7 +55,8 @@ def main():
                       tokenizer=tokenizer,
                       args=training_args,
                       train_dataset=train_dataset,
-                      eval_dataset=eval_dataset)
+                      eval_dataset=eval_dataset,
+                      data_collator=data_collator)
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
