@@ -10,7 +10,9 @@ from transformers import AutoTokenizer, Trainer
 
 from dataset import DataArguments, SpeechDataset
 from speech_llm import init_model, ModelArguments
-
+from trl import GRPOConfig
+from speech_grpo_trainer import SpeechGRPOTrainer
+from reward_funcs import active_reward_func
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -48,12 +50,32 @@ def main():
                                      model_args)
     else:
         eval_dataset = None
+
+    if training_args.grpo:
+        config = training_args.to_dict()
+        config['remove_unused_columns'] = False
+        config['num_generations'] = 4  #GRPO中的group number
+        grpo_config = GRPOConfig(**config)
+        trainer_cls = SpeechGRPOTrainer
+        trainer_arg = {
+            'processing_class': tokenizer,
+            'reward_funcs': active_reward_func
+        }
+        args = grpo_config
+    else:
+        trainer_cls = Trainer 
+        trainer_arg = {
+            'tokenizer': tokenizer,
+        }
+        args = training_args
+
+    print(args.to_dict())
     # Start trainer
-    trainer = Trainer(model=model,
-                      tokenizer=tokenizer,
-                      args=training_args,
+    trainer = trainer_cls(model=model,
+                      args=grpo_config,
                       train_dataset=train_dataset,
-                      eval_dataset=eval_dataset)
+                      eval_dataset=eval_dataset,
+                      **trainer_arg)
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:

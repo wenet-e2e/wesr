@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import torchaudio
 import transformers
 import whisper
+from tqdm import tqdm
 
 
 @dataclass
@@ -40,9 +41,23 @@ class SpeechDataset(Dataset):
         self.config = config
         self.inference = inference
         self.raw_data = []
+        i = 0
         with open(data_path, "r") as f:
-            for line in f:
-                self.raw_data.append(json.loads(line))
+            for line in tqdm(f):
+                i += 1
+                if i > 100000:
+                    break
+                if not line.startswith('{'):
+                    key, wav, txt, txt2, start, end, dur, u1, _, _, _ = line.split('\t')
+                    obj = {}
+                    obj['wav'] = wav
+                    obj['key'] = key
+                    obj['txt'] = txt.replace('▁',' ')
+                    obj['start'] = round(float(start))
+                    obj['end'] = round(float(end))
+                    self.raw_data.append(obj)
+                else:
+                    self.raw_data.append(json.loads(line))
 
     def __len__(self):
         return len(self.raw_data)
@@ -122,6 +137,9 @@ class SpeechDataset(Dataset):
             'attention_mask': attention_mask,
             'mel': mel,
             'mel_len': mel_len,
+            'prompt': 'Transcribe the speech',
+            'key':msg['key'],
+            'txt':msg['txt']
         }
         if not self.inference:
             ret['labels'] = target_ids

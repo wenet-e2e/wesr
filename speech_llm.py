@@ -3,6 +3,7 @@
 import math
 from typing import Optional
 from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Sized, Union
 
 import safetensors
 import torch
@@ -155,6 +156,7 @@ class SpeechLLM(PreTrainedModel):
         mel_len: torch.LongTensor = None,
         ctc_ids: torch.LongTensor = None,
         ctc_ids_len: torch.LongTensor = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0
     ):
         max_speech_size = self.model_args.max_speech_token_size
         text_emb = self.llm.get_input_embeddings()(input_ids)
@@ -163,7 +165,8 @@ class SpeechLLM(PreTrainedModel):
             (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
         out = self.llm(inputs_embeds=inputs_embeds,
                        attention_mask=attention_mask,
-                       labels=labels)
+                       labels=labels, 
+                       logits_to_keep=logits_to_keep)
         ctc_weight = self.model_args.ctc_weight
         if ctc_weight > 0:
             # Tie CTC linear transforme and input embedding weight
@@ -172,7 +175,7 @@ class SpeechLLM(PreTrainedModel):
             ctc_act = ctc_act.transpose(0, 1)
             ctc_prob = ctc_act.log_softmax(2)
             prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast(enabled=False):
                 closs = self.ctc_loss(ctc_prob.float(), ctc_ids, prob_len,
                                       ctc_ids_len)
             out.loss = (1 - ctc_weight) * out.loss + ctc_weight * closs
@@ -187,6 +190,10 @@ class SpeechLLM(PreTrainedModel):
         mel_len: torch.LongTensor = None,
         eos_token_id=None,
         decode_config=None,
+        do_sample=False,
+        top_p=1.0,
+        temperature=0.7
+        **kwargs
     ):
         max_speech_size = self.model_args.max_speech_token_size
         text_emb = self.llm.get_input_embeddings()(input_ids)
@@ -196,11 +203,15 @@ class SpeechLLM(PreTrainedModel):
         model_outputs = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            do_sample=False,
-            top_p=1.0,
+            # do_sample=False,
+            # top_p=1.0,
+            do_sample=do_sample,
+            top_p=top_p,
+            temperature=temperature,
             num_beams=decode_config.num_beams,
             max_new_tokens=decode_config.max_new_tokens,
             eos_token_id=eos_token_id,
+            **kwargs
         )
         return model_outputs
 

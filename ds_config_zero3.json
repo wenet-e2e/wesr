@@ -25,7 +25,7 @@
         "params": {
             "warmup_min_lr": "auto",
             "warmup_max_lr": "auto",
-            "warmup_num_steps": "auto"
+            "warmup_num_steps": 2500
         }
     },
 
@@ -42,6 +42,7 @@
         "overlap_comm": true,
         "contiguous_gradients": true,
         "sub_group_size": 1e9,
+        "reduce_scatter": true,
         "reduce_bucket_size": "auto",
         "stage3_prefetch_bucket_size": "auto",
         "stage3_param_persistence_threshold": "auto",
