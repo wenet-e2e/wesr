@@ -34,6 +34,7 @@ class SpeechDataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         config,  # model config
         inference: bool = False,
+        grpo = False,
     ):
         super(SpeechDataset, self).__init__()
         print("Formatting inputs...")
@@ -58,6 +59,7 @@ class SpeechDataset(Dataset):
                     self.raw_data.append(obj)
                 else:
                     self.raw_data.append(json.loads(line))
+        self.grpo = grpo
 
     def __len__(self):
         return len(self.raw_data)
@@ -137,10 +139,13 @@ class SpeechDataset(Dataset):
             'attention_mask': attention_mask,
             'mel': mel,
             'mel_len': mel_len,
-            'prompt': 'Transcribe the speech',
-            'key':msg['key'],
-            'txt':msg['txt']
         }
+        if self.grpo:
+            ret['prompt'] = instruction
+            if 'key' in msg:
+                ret['key'] = msg['key']
+            ret['txt'] = msg['txt']
+
         if not self.inference:
             ret['labels'] = target_ids
             ret['ctc_ids'] = ctc_ids

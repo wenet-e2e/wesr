@@ -17,6 +17,8 @@ from reward_funcs import active_reward_func
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adafactor")
+    grpo: bool = field(default=False)
+    remove_unused_columns: bool = field(default=False)
 
 
 def main():
@@ -44,7 +46,7 @@ def main():
         tokenizer.pad_token = '<|finetune_right_pad_id|>'
 
     print("Loading data...")
-    train_dataset = SpeechDataset(data_args.data_path, tokenizer, model_args)
+    train_dataset = SpeechDataset(data_args.data_path, tokenizer, model_args, grpo = training_args.grpo)
     if data_args.eval_data_path:
         eval_dataset = SpeechDataset(data_args.eval_data_path, tokenizer,
                                      model_args)
@@ -54,7 +56,8 @@ def main():
     if training_args.grpo:
         config = training_args.to_dict()
         config['remove_unused_columns'] = False
-        config['num_generations'] = 4  #GRPO中的group number
+        config['num_generations'] = 2  #GRPO中的group number
+        del config['grpo']
         grpo_config = GRPOConfig(**config)
         trainer_cls = SpeechGRPOTrainer
         trainer_arg = {
@@ -67,18 +70,20 @@ def main():
         trainer_arg = {
             'tokenizer': tokenizer,
         }
+        # training_args.remove_unused_columns = False
         args = training_args
 
     print(args.to_dict())
     # Start trainer
     trainer = trainer_cls(model=model,
-                      args=grpo_config,
+                      args=args,
                       train_dataset=train_dataset,
                       eval_dataset=eval_dataset,
                       **trainer_arg)
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        trainer.train(resume_from_checkpoint=True)
-    else:
+    if 1:
+    # if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
+    #     trainer.train(resume_from_checkpoint=True)
+    # else:
         trainer.train()
     trainer.save_state()
 

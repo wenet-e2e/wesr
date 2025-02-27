@@ -149,8 +149,11 @@ class SpeechGRPOTrainer(GRPOTrainer):
                     mel = mel, mel_len = mel_len,
                     eos_token_id=eos_token_id,
                     do_sample=True,
-                    top_p=0.9,
-                    temperature=0.7,
+                    repetition_penalty=1.2,
+                    no_repeat_ngram_size=3,
+
+                    # top_p=0.9,
+                    temperature=0.9,
                     decode_config=self.generation_config,
                 )
 
@@ -358,7 +361,11 @@ class SpeechGRPOTrainer(GRPOTrainer):
     
     def _get_per_token_logps(self, model, input_ids, attention_mask, mel, mel_len, logits_to_keep):
         # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
-        logits = model(input_ids=input_ids, attention_mask=attention_mask, mel=mel, mel_len=mel_len, logits_to_keep=logits_to_keep + 1).logits
+        logits = model(input_ids=input_ids, 
+                       attention_mask=attention_mask, 
+                       mel=mel, 
+                       mel_len=mel_len, 
+                       logits_to_keep=logits_to_keep + 1).logits
         # logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
 
         input_ids = input_ids[:, -logits_to_keep:]

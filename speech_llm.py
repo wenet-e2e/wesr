@@ -119,8 +119,8 @@ class SpeechLLM(PreTrainedModel):
         # Do not save the parameter of llm and whisper
         for k in self.llm.state_dict().keys():
             self._keys_to_ignore_on_save.add('llm.' + k)
-        for k in self.encoder.state_dict().keys():
-            self._keys_to_ignore_on_save.add('encoder.' + k)
+        # for k in self.encoder.state_dict().keys():
+        #     self._keys_to_ignore_on_save.add('encoder.' + k)
         # Use bos_token_id as CTC blank id
         self.ctc_loss = nn.CTCLoss(config.bos_token_id,
                                    reduction='mean',
@@ -192,7 +192,7 @@ class SpeechLLM(PreTrainedModel):
         decode_config=None,
         do_sample=False,
         top_p=1.0,
-        temperature=0.7
+        temperature=0.7,
         **kwargs
     ):
         max_speech_size = self.model_args.max_speech_token_size
@@ -203,14 +203,13 @@ class SpeechLLM(PreTrainedModel):
         model_outputs = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            # do_sample=False,
-            # top_p=1.0,
             do_sample=do_sample,
             top_p=top_p,
             temperature=temperature,
             num_beams=decode_config.num_beams,
             max_new_tokens=decode_config.max_new_tokens,
             eos_token_id=eos_token_id,
+            pad_token_id=decode_config.pad_token_id,
             **kwargs
         )
         return model_outputs
