@@ -12,6 +12,7 @@ import transformers
 from transformers import AutoModelForCausalLM, PreTrainedModel
 import wenet
 import whisper
+from peft import LoraConfig, get_peft_model
 
 
 @dataclass
@@ -37,6 +38,7 @@ class ModelArguments:
     ctc_weight: Optional[float] = field(default=0.0)
     # For decode
     decode_instruction: Optional[str] = field(default="")
+    use_lora: Optional[bool] = field(default=False)
 
     @property
     def ds_rate(self):
@@ -116,8 +118,6 @@ class SpeechLLM(PreTrainedModel):
         self.projector = projector
         self._keys_to_ignore_on_save = set()
         # Do not save the parameter of llm and whisper
-        for k in self.llm.state_dict().keys():
-            self._keys_to_ignore_on_save.add('llm.' + k)
         for k in self.encoder.state_dict().keys():
             self._keys_to_ignore_on_save.add('encoder.' + k)
         # Use bos_token_id as CTC blank id
@@ -126,6 +126,34 @@ class SpeechLLM(PreTrainedModel):
                                    zero_infinity=True)
         self.blank_id = config.bos_token_id
         self.model_args = model_args
+
+        # peft
+        if model_args.use_lora:
+            lora_config = LoraConfig(
+                r=8,
+                lora_alpha=32,
+                target_modules=[
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "up_proj",
+                    "gate_proj",
+                    "down_proj",
+                ],
+                lora_dropout=0.1,
+                task_type="CAUSAL_LM",
+                inference_mode=False,
+            )
+            self.llm = get_peft_model(self.llm, lora_config)
+            self.llm.print_trainable_parameters()
+            # only save lora parameters
+            for k in self.llm.state_dict().keys():
+                if list(self.llm.peft_config.keys())[0] not in k:
+                    self._keys_to_ignore_on_save.add('llm.' + k)
+        else:
+            for k in self.llm.state_dict().keys():
+                self._keys_to_ignore_on_save.add('llm.' + k)
 
     def get_speech_embeddings(self, mel, mel_len):
         max_speech_size = self.model_args.max_speech_token_size

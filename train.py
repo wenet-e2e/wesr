@@ -27,7 +27,8 @@ def main():
     ) = parser.parse_args_into_dataclasses()
 
     model = init_model(model_args)
-    model.freeze_llm()
+    if not model_args.use_lora:
+        model.freeze_llm()
     model.freeze_encoder()
 
     if training_args.gradient_checkpointing:
