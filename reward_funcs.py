@@ -11,7 +11,8 @@ def editdistance_score(completions, **kwargs):
     diff = []
     for hyp, lab in zip(completions,kwargs['txt']):
         # diff.append(-1.0 * editdistance.eval(hyp, lab) / len(lab))
-        diff.append(np.log(1e-9 + editdistance.eval(hyp, lab)))
+        # diff.append(np.log(1e-9 + editdistance.eval(hyp, lab)))
+        diff.append(-editdistance.eval(hyp, lab))
     return diff
 
 def word_count(completions, **kwargs):

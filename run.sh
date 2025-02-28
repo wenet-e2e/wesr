@@ -74,8 +74,9 @@ if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
 
 fi
 
+ckpt=$2
 TEST_MODEL=Qwen-1.5B-Instruct-whisper-tiny/checkpoint-1170/model.safetensors
-TEST_MODEL=Qwen/Qwen2-1.5B-Instruct-whisper-tiny/checkpoint-3/model.safetensors
+TEST_MODEL=Qwen/Qwen2-1.5B-Instruct-whisper-tiny/checkpoint-${ckpt}/model.safetensors
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     python recognize.py \
         --llm_model_name_or_path  ${LLM_MODEL} \

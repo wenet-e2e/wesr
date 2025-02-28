@@ -33,8 +33,7 @@ def main():
 
     model = init_model(model_args)
     model.freeze_llm()
-    # model.freeze_encoder()
-    
+    model.freeze_encoder()
 
     if training_args.gradient_checkpointing:
         model.enable_input_require_grads()
