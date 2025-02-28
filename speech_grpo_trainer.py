@@ -1,31 +1,24 @@
 from typing import Any, Callable, Optional, Sized, Union
 import torch
 from torch import nn
-from accelerate.utils import broadcast_object_list, gather, gather_object, is_peft_model, set_seed
-from accelerate.utils.other import is_compiled_module
+from accelerate.utils import broadcast_object_list, gather, gather_object
 import transformers
 from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
     GenerationConfig,
     PreTrainedModel,
-    PreTrainedTokenizerBase,
-    Trainer,
     TrainerCallback,
     is_wandb_available,
 )
-from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_chat_template
-from trl import ModelConfig, GRPOConfig, GRPOTrainer
-from trl.models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
-from trl.import_utils import is_rich_available, is_vllm_available
+from trl import GRPOConfig, GRPOTrainer
+from trl.models import unwrap_model_for_generation
+from trl.import_utils import is_rich_available
+from trl.extras.profiling import profiling_decorator
 from trl.trainer.utils import (
-    generate_model_card,
-    get_comet_experiment_url,
     pad,
     print_prompt_completions_sample,
     selective_log_softmax,
 )
+from copy import deepcopy
 if is_wandb_available():
     import wandb
 
@@ -42,6 +35,7 @@ class SpeechGRPOTrainer(GRPOTrainer):
         callbacks: Optional[list[TrainerCallback]] = None,
         optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
         peft_config = None,
+        ref_model = None,
     ):
         super().__init__(
             model=model,
@@ -56,40 +50,25 @@ class SpeechGRPOTrainer(GRPOTrainer):
             peft_config = peft_config
         )
         self.generation_config = GenerationConfig(
-            max_new_tokens=self.max_completion_length,
             do_sample=True,
             temperature=args.temperature,
             pad_token_id=processing_class.pad_token_id,
-            num_beams=args.num_generations
+            eos_token_id=processing_class.eos_token_id,
+            max_new_tokens=100,
+            num_beams=1,
+            top_p=0.9,
         )
+        if ref_model is not None:
+            self.ref_model = ref_model
+            # with unwrap_model_for_generation(ref_model, self.accelerator) as unwrapped_model:
+                # self.ref_model = deepcopy(unwrapped_model)
 
-        
-    def _prepare_inputs(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
-        mode = "eval" if self.control.should_evaluate else "train"
-        if mode == "train":
-            if self.state.global_step % self.num_iterations == 0:
-                inputs = self._generate_and_score_completions(inputs)
-                self._buffered_inputs[self._step % self.args.gradient_accumulation_steps] = inputs
-            else:
-                inputs = self._buffered_inputs[self._step % self.args.gradient_accumulation_steps]
-            self._step += 1
-        else:
-            # In evaluation, we don't reuse completions across multiple updates, so we don't need to buffer inputs.
-            inputs = self._generate_and_score_completions(inputs)
-        return inputs
-
+    @profiling_decorator
     def _generate_and_score_completions(
         self, inputs: dict[str, Union[torch.Tensor, Any]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
         prompts = [x["prompt"] for x in inputs]
-        # prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
-        # prompt_inputs = self.processing_class(
-        #     prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-        # )
-        # prompt_inputs = super(GRPOTrainer, self)._prepare_inputs(prompt_inputs)
-        # prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-
         prompt_ids = torch.stack([x["input_ids"] for x in inputs])
         prompt_mask = torch.stack([x["attention_mask"] for x in inputs])
         mel = torch.stack([x["mel"] for x in inputs])
@@ -138,29 +117,17 @@ class SpeechGRPOTrainer(GRPOTrainer):
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         else:
             # Regular generation path
-            # self.accelerator.free_memory()
-                # if decode_args.llm_type == 'qwen2':
-            eos_token_id = self.processing_class.convert_tokens_to_ids(
-                ['<|endoftext|>', '<|im_end|>'])
- 
+
             with unwrap_model_for_generation(self.model, self.accelerator) as unwrapped_model:
-                prompt_completion_ids = unwrapped_model.generate(
+                completion_ids = unwrapped_model.generate(
                     prompt_ids, attention_mask=prompt_mask, 
                     mel = mel, mel_len = mel_len,
-                    eos_token_id=eos_token_id,
-                    do_sample=True,
                     repetition_penalty=1.2,
                     no_repeat_ngram_size=3,
-
-                    # top_p=0.9,
-                    temperature=0.9,
                     decode_config=self.generation_config,
                 )
 
-            # Compute prompt length and extract completion ids
-            # prompt_length = prompt_ids.size(1)
-            # prompt_ids = prompt_completion_ids[:, :prompt_length]
-            completion_ids = prompt_completion_ids#[:, prompt_length:]
+            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
 
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
@@ -187,9 +154,10 @@ class SpeechGRPOTrainer(GRPOTrainer):
             if self.beta == 0.0:
                 ref_per_token_logps = None
             elif self.ref_model is not None:
-                ref_per_token_logps = self._get_per_token_logps(
-                    self.ref_model, prompt_completion_ids, attention_mask, mel, mel_len, logits_to_keep
-                )
+                with unwrap_model_for_generation(self.ref_model, self.accelerator) as unwrapped_model:
+                    ref_per_token_logps = self._get_per_token_logps(
+                        unwrapped_model, prompt_completion_ids, attention_mask, mel, mel_len, logits_to_keep
+                    )
             else:
                 with self.accelerator.unwrap_model(self.model).disable_adapter():
                     ref_per_token_logps = self._get_per_token_logps(
@@ -198,25 +166,13 @@ class SpeechGRPOTrainer(GRPOTrainer):
 
         # Decode the generated completions
         completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
-        # if is_conversational(inputs[0]):
-        #     completions = []
-        #     for prompt, completion in zip(prompts, completions_text):
-        #         bootstrap = prompt.pop()["content"] if prompt[-1]["role"] == "assistant" else ""
-        #         completions.append([{"role": "assistant", "content": bootstrap + completion}])
-        # else:
-        completions = completions_text
 
         rewards_per_func = torch.zeros(prompt_ids.size(0), len(self.reward_funcs), device=device)
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
         ):
             if isinstance(reward_func, nn.Module):  # Module instead of PretrainedModel for compat with compiled models
-                # if is_conversational(inputs[0]):
-                #     messages = [{"messages": p + c} for p, c in zip(prompts, completions)]
-                #     texts = [apply_chat_template(x, reward_processing_class)["text"] for x in messages]
-                # else:
-                    # texts = [p + c for p, c in zip(prompts, completions)]
-                texts = completions
+                texts = completions_text
                 reward_inputs = reward_processing_class(
                     texts, return_tensors="pt", padding=True, padding_side="right", add_special_tokens=False
                 )
@@ -227,7 +183,7 @@ class SpeechGRPOTrainer(GRPOTrainer):
                 # Repeat all input columns (but "prompt" and "completion") to match the number of generations
                 keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
                 reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
-                output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
+                output_reward_func = reward_func(prompts=prompts, completions=completions_text, **reward_kwargs)
                 rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
@@ -271,7 +227,6 @@ class SpeechGRPOTrainer(GRPOTrainer):
         self._metrics[mode]["reward_std"].append(std_grouped_rewards.mean().item())
 
         if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
-            # prompts_to_log = gather_object(prompts_text)
             prompts_to_log = gather_object(prompts)
             completions_to_log = gather_object(completions_text)
             rewards_to_log = rewards.tolist()
@@ -308,17 +263,17 @@ class SpeechGRPOTrainer(GRPOTrainer):
             "ref_per_token_logps": ref_per_token_logps,
             "advantages": advantages,
         }
+    @profiling_decorator
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
             raise ValueError("The GRPOTrainer does not support returning outputs")
         # Compute the per-token log probabilities for the model
 
-        prompt_ids = inputs['prompt_ids'] # torch.stack([x["input_ids"] for x in inputs])
-        prompt_mask = inputs['prompt_mask'] # torch.stack([x["attention_mask"] for x in inputs])
-        mel = inputs['mel'] # torch.stack([x["mel"] for x in inputs])
-        mel_len = inputs['mel_len'] # torch.stack([torch.tensor(x["mel_len"]) for x in inputs])
+        prompt_ids = inputs['prompt_ids']
+        prompt_mask = inputs['prompt_mask']
+        mel = inputs['mel'] 
+        mel_len = inputs['mel_len']
 
-        # prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
@@ -359,6 +314,7 @@ class SpeechGRPOTrainer(GRPOTrainer):
         self._metrics[mode]["clip_ratio"].append(self.accelerator.gather_for_metrics(clip_ratio).mean().item())
         return loss
     
+    @profiling_decorator
     def _get_per_token_logps(self, model, input_ids, attention_mask, mel, mel_len, logits_to_keep):
         # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
         logits = model(input_ids=input_ids, 
@@ -366,7 +322,7 @@ class SpeechGRPOTrainer(GRPOTrainer):
                        mel=mel, 
                        mel_len=mel_len, 
                        logits_to_keep=logits_to_keep + 1).logits
-        # logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
+        logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
 
         input_ids = input_ids[:, -logits_to_keep:]
         # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.

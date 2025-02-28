@@ -9,7 +9,7 @@ import transformers
 from transformers import AutoTokenizer, Trainer
 
 from dataset import DataArguments, SpeechDataset
-from speech_llm import init_model, ModelArguments
+from speech_llm import init_model, ModelArguments, SpeechLLM
 from trl import GRPOConfig
 from speech_grpo_trainer import SpeechGRPOTrainer
 from reward_funcs import active_reward_func
@@ -19,6 +19,7 @@ class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adafactor")
     grpo: bool = field(default=False)
     remove_unused_columns: bool = field(default=False)
+    temperature: float = field(default=0.9)
 
 
 def main():
@@ -32,7 +33,8 @@ def main():
 
     model = init_model(model_args)
     model.freeze_llm()
-    model.freeze_encoder()
+    # model.freeze_encoder()
+    
 
     if training_args.gradient_checkpointing:
         model.enable_input_require_grads()
@@ -65,6 +67,11 @@ def main():
             'reward_funcs': active_reward_func
         }
         args = grpo_config
+        ref_model = SpeechLLM.from_pretrained('./west-slm')
+        ref_model.freeze_llm()
+        ref_model.freeze_encoder()
+        ref_model.freeze_projector()
+        ref_model.eval()
     else:
         trainer_cls = Trainer 
         trainer_arg = {
@@ -75,7 +82,7 @@ def main():
 
     print(args.to_dict())
     # Start trainer
-    trainer = trainer_cls(model=model,
+    trainer = trainer_cls(model=model, ref_model=ref_model,
                       args=args,
                       train_dataset=train_dataset,
                       eval_dataset=eval_dataset,

@@ -60,6 +60,8 @@ class SpeechDataset(Dataset):
                 else:
                     self.raw_data.append(json.loads(line))
         self.grpo = grpo
+        if self.grpo:
+            self.inference = True
 
     def __len__(self):
         return len(self.raw_data)
@@ -145,6 +147,7 @@ class SpeechDataset(Dataset):
             if 'key' in msg:
                 ret['key'] = msg['key']
             ret['txt'] = msg['txt']
+            ret['wav'] = msg['wav']
 
         if not self.inference:
             ret['labels'] = target_ids

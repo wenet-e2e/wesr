@@ -12,3 +12,4 @@ accelerate>=1.4.0
 #trl>=0.16
 #git+https://github.com/wenet-e2e/wenet.git
 jieba
+editdistance

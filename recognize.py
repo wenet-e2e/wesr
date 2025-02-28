@@ -11,7 +11,8 @@ from accelerate import Accelerator
 
 from dataset import SpeechDataset, DataArguments
 from speech_llm import init_model, ModelArguments
-
+from transformers import GenerationConfig
+ 
 
 @dataclass
 class DecodeArguments:
@@ -32,6 +33,7 @@ def main():
     if decode_args.llm_type == 'qwen2':
         eos_token_id = tokenizer.convert_tokens_to_ids(
             ['<|endoftext|>', '<|im_end|>'])
+        decode_args.pad_token_id = tokenizer.pad_token_id
     else:
         tokenizer.pad_token = '<|finetune_right_pad_id|>'
         eos_token_id = tokenizer.convert_tokens_to_ids(
@@ -52,11 +54,20 @@ def main():
         decode_func = model.generate
     else:
         decode_func = model.decode_ctc
+    generation_config = GenerationConfig(
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            max_new_tokens=100,
+            num_beams=1,
+        )
     with torch.no_grad():
         for item in tqdm(data_loader):
             generated_ids = decode_func(**item,
-                                        eos_token_id=eos_token_id,
-                                        decode_config=decode_args)
+                                        decode_config=generation_config,
+                                        repetition_penalty=1.2,
+                                        no_repeat_ngram_size=3,
+                                        )
             text = tokenizer.batch_decode(generated_ids,
                                           skip_special_tokens=True)
             print(text)
