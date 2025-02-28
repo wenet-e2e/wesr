@@ -1,0 +1,10 @@
+*pyc
+*pth
+*checkpoint*
+*workspace
+*txt
+core*
+*safetensors
+*swp
+*jsonl
+west-slm/
