@@ -1,12 +1,11 @@
 # Copyright (c) 2025 Binbin Zhang(binbzha@qq.com)
 
 import math
-import random
 import json
 from dataclasses import dataclass, field
 from typing import Dict
 
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset
 from transformers.trainer_pt_utils import LabelSmoother
 import torch
 import torchaudio
@@ -23,6 +22,21 @@ class DataArguments:
         default=None, metadata={"help": "Path to the evaluation data."})
     test_data_path: str = field(default=None,
                                 metadata={"help": "Path to the test data."})
+    max_tokens_in_batch: int = field(
+        default=2000,
+        metadata={"help": "the maximum number of tokens in a batch"})
+    batch_type: str = field(default="static",
+                            metadata={"help": "static or dynamic"})
+    batch_size: int = field(
+        default=8, metadata={"help": "number of utterances in a batch"})
+    sort: bool = field(
+        default=False,
+        metadata={
+            "help":
+            "whether to sort all data, so the utterance with the same length could be filled in a same batch"
+        })
+    text_token_per_second: int = field(
+        default=8, metadata={"help": "number of text tokens per second"})
 
 
 @dataclass
@@ -31,28 +45,28 @@ class CustomDataCollator:
     pad_token_id: int = -1
     ignore_token_id: int = LabelSmoother.ignore_index
 
-    def __call__(self, batch):
-        """
-        [{"mel", "mel_len", "label_ids", "ctc_ids", "ctc_ids_len"},...]
-
-        """
-        assert isinstance(batch, list)
+    def _padding(self, batch):
+        # padding feats
         feats = [x['mel'] for x in batch]
         feats_length = torch.tensor([x['mel'].shape[0] for x in batch],
                                     dtype=torch.int64)
-        max_feats_length = torch.max(feats_length)
+        padded_feats = pad_sequence(feats, batch_first=True,
+                                    padding_value=0).transpose(1, 2)  # [80, T]
+        max_speech_token_size = math.ceil(
+            torch.max(feats_length) / self.ds_rate)
 
-        padded_feats = pad_sequence(feats, batch_first=True, padding_value=0)
-        padded_feats = padded_feats.transpose(1, 2)  # [80, T]
-        max_speech_token_size = math.ceil(max_feats_length / self.ds_rate)
-
+        # padding tokens
         ids_audio = torch.cat([
             torch.tensor([0] * max_speech_token_size).unsqueeze(0)
-            for _ in batch], dim=0)
+            for _ in batch
+        ],
+                              dim=0)
         tgt_audio = torch.cat([
             torch.tensor(
                 [self.ignore_token_id] * max_speech_token_size).unsqueeze(0)
-            for _ in batch], dim=0)
+            for _ in batch
+        ],
+                              dim=0)
 
         ids_text = [x['label_ids'] for x in batch]
         padded_ids_text = pad_sequence(ids_text,
@@ -82,54 +96,9 @@ class CustomDataCollator:
             ret['labels'] = target_ids
         return ret
 
-
-class DynamicBatchSampler(Sampler):
-
-    def __init__(self, dataset, max_tokens_in_batch, ds_rate):
-        self.dataset = dataset
-        self.max_tokens_in_batch = max_tokens_in_batch
-        self.ds_rate = ds_rate
-        self.indices = list(range(len(dataset)))
-        random.shuffle(self.indices)
-        self._buffer = []
-        self.longest_ids_length = 0
-        self.longest_speech_token = 0
-
-    def dynamic_batch_window(self, sample, buffer_size):
-        assert isinstance(sample, dict)
-        assert 'mel' in sample
-        assert 'label_ids' in sample
-        new_speech_token = math.ceil(sample['mel'].size(1) / self.ds_rate)
-        self.longest_speech_token = max(self.longest_speech_token,
-                                        new_speech_token)
-        new_ids_length = sample['label_ids'].size(0)
-        self.longest_ids_length = max(self.longest_ids_length, new_ids_length)
-
-        tokens_after_padding = (self.longest_speech_token +
-                                self.longest_ids_length) * (buffer_size + 1)
-        if tokens_after_padding > self.max_tokens_in_batch:
-            self.longest_speech_token = new_speech_token
-            self.longest_ids_length = new_ids_length
-            return True
-        return False
-
-    def __iter__(self):
-        for idx in self.indices:
-            if not self.dynamic_batch_window(self.dataset[idx], len(
-                    self._buffer)):
-                self._buffer.append(idx)
-            else:
-                if len(self._buffer) > 0:
-                    yield self._buffer
-                del self._buffer
-                self._buffer = [idx]
-        if len(self._buffer) > 0:
-            yield self._buffer
-        del self._buffer
-        self._buffer = []
-
-    def __len__(self):
-        return len(self.indices)
+    def __call__(self, batch):
+        assert len(batch) == 1
+        return self._padding(batch[0])
 
 
 class SpeechDataset(Dataset):
@@ -141,6 +110,11 @@ class SpeechDataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         config,  # model config
         inference: bool = False,
+        batch_type: str = 'static',
+        batch_size: int = 8,
+        max_tokens_in_batch: int = 2000,
+        sort: bool = False,
+        text_token_per_second: int = 8,
     ):
         super(SpeechDataset, self).__init__()
         print("Formatting inputs...")
@@ -152,63 +126,94 @@ class SpeechDataset(Dataset):
             for line in f:
                 self.raw_data.append(json.loads(line))
 
+        if sort:
+            self.raw_data = sorted(self.raw_data, key=lambda x: x['duration'])
+
+        self.minibatch = []
+        num_data = len(self.raw_data)
+        if batch_type == "dynamic":
+            assert max_tokens_in_batch > 0
+            self.minibatch.append([])
+            num_tokens_in_batch = 0
+            for i in range(num_data):
+                length = self.raw_data[i][
+                    'duration'] * self.config.speech_tokens_per_second
+                if 'label_ids' in self.raw_data[i]:
+                    length += len(self.raw_data[i]['label_ids'])
+                else:
+                    length += int(text_token_per_second *
+                                  self.raw_data[i]['duration'])
+                num_tokens_in_batch += length
+                if num_tokens_in_batch > max_tokens_in_batch:
+                    self.minibatch.append([])
+                    num_tokens_in_batch = length
+                self.minibatch[-1].append(self.raw_data[i])
+        else:
+            cur = 0
+            while cur < num_data:
+                self.minibatch.append(self.raw_data[cur:cur + batch_size])
+                cur += batch_size
+
     def __len__(self):
-        return len(self.raw_data)
+        return len(self.minibatch)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        IGNORE_TOKEN_ID = LabelSmoother.ignore_index
-        msg = self.raw_data[i]
-        audio, sample_rate = torchaudio.load(msg['wav'])
-        if sample_rate != 16000:
-            audio = torchaudio.transforms.Resample(sample_rate, 16000)(audio)
-        if self.config.encoder_type == 'whisper':
-            mel_len = math.ceil(
-                float(audio.size(1)) / 16000 * self.config.frames_per_second)
-            audio = whisper.pad_or_trim(audio[0])
-            mel = whisper.log_mel_spectrogram(audio)  # [80, T]
-            mel = mel.transpose(0, 1)  # [T, 80]
-        else:
-            # Note: We use 16-bit quantization by default in WeNet.
-            audio = audio * (1 << 15)
-            mel = torchaudio.compliance.kaldi.fbank(audio,
-                                                    num_mel_bins=80,
-                                                    frame_length=25,
-                                                    frame_shift=10,
-                                                    dither=0.0,
-                                                    energy_floor=0.0,
-                                                    sample_frequency=16000)
-            mel_len = mel.size(0)
-        if 'instruction' in msg:
-            instruction = msg['instruction']
-        elif self.inference and self.config.decode_instruction != '':
-            instruction = self.config.decode_instruction
-        else:
-            instruction = 'Transcribe the speech'
-        chat = [{"role": "user", "content": instruction}]
-        # `content`: the anwser acorrding to the audio and instruction
-        # `txt`: the transcription of the audio
-        # If there is no content, the default `content` is the same as `txt`.
-        content = msg['content'] if 'content' in msg else msg['txt']
-        if self.inference:
-            kwargs = {'add_generation_prompt': True}
-        else:
-            chat.append({"role": "assistant", "content": content})
-            kwargs = {'add_generation_prompt': False}
-        ids_text = self.tokenizer.apply_chat_template(chat,
-                                                      tokenize=True,
-                                                      **kwargs)
-        ids_text = torch.tensor(ids_text, dtype=torch.int)
+        return self._extract_feature_and_token(self.minibatch[i])
 
-        ctc_tokens = self.tokenizer(msg['txt'], return_tensors='pt')
-        ctc_ids = ctc_tokens['input_ids'][0]
-        ctc_ids_len = torch.tensor(ctc_tokens['attention_mask'].sum().item(),
-                                   dtype=torch.int)
-        ret = {
-            'label_ids': ids_text,
-            'mel': mel,
-            'mel_len': mel_len,
-        }
-        if not self.inference:
-            ret['ctc_ids'] = ctc_ids
-            ret['ctc_ids_len'] = ctc_ids_len
-        return ret
+    def _extract_feature_and_token(self, batch):
+        processed_batch = []
+        for msg in batch:
+            audio, sample_rate = torchaudio.load(msg['wav'])
+            if sample_rate != 16000:
+                audio = torchaudio.functional.resample(audio, sample_rate,
+                                                       16000)
+            if self.config.encoder_type == 'whisper':
+                mel_len = math.ceil(
+                    float(audio.size(1)) / 16000 *
+                    self.config.frames_per_second)
+                audio = whisper.pad_or_trim(audio[0])
+                mel = whisper.log_mel_spectrogram(audio).transpose(0,
+                                                                   1)  # [T, 80]
+            else:
+                audio = audio * (1 << 15)
+                mel = torchaudio.compliance.kaldi.fbank(audio,
+                                                        num_mel_bins=80,
+                                                        frame_length=25,
+                                                        frame_shift=10,
+                                                        dither=0.0,
+                                                        energy_floor=0.0,
+                                                        sample_frequency=16000)
+                mel_len = mel.size(0)
+            if 'instruction' in msg:
+                instruction = msg['instruction']
+            elif self.inference and self.config.decode_instruction != '':
+                instruction = self.config.decode_instruction
+            else:
+                instruction = "Transcribe the speech"
+            chat = [{"role": "user", "content": instruction}]
+            content = msg['content'] if 'content' in msg else msg['txt']
+            if self.inference:
+                kwargs = {'add_generation_prompt': True}
+            else:
+                chat.append({"role": "assistant", "content": content})
+                kwargs = {'add_generation_prompt': False}
+
+            ids_text = self.tokenizer.apply_chat_template(chat,
+                                                          tokenize=True,
+                                                          **kwargs)
+            ids_text = torch.tensor(ids_text, dtype=torch.int)
+
+            ctc_tokens = self.tokenizer(msg['txt'], return_tensors='pt')
+            ctc_ids = ctc_tokens['input_ids'][0]
+            ctc_ids_len = torch.tensor(
+                ctc_tokens['attention_mask'].sum().item(), dtype=torch.int)
+
+            processed_batch.append({
+                'label_ids': ids_text,
+                'mel': mel,
+                'mel_len': mel_len,
+            })
+            if not self.inference:
+                processed_batch[-1]['ctc_ids'] = ctc_ids
+                processed_batch[-1]['ctc_ids_len'] = ctc_ids_len
+        return processed_batch

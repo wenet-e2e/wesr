@@ -37,7 +37,6 @@ class ModelArguments:
     ctc_weight: Optional[float] = field(default=0.0)
     # For decode
     decode_instruction: Optional[str] = field(default="")
-    max_tokens_in_batch: Optional[int] = field(default=None)
 
     @property
     def ds_rate(self):
