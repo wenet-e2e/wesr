@@ -59,14 +59,12 @@ class CustomDataCollator:
         ids_audio = torch.cat([
             torch.tensor([0] * max_speech_token_size).unsqueeze(0)
             for _ in batch
-        ],
-                              dim=0)
+        ], dim=0)
         tgt_audio = torch.cat([
             torch.tensor(
                 [self.ignore_token_id] * max_speech_token_size).unsqueeze(0)
             for _ in batch
-        ],
-                              dim=0)
+        ], dim=0)
 
         ids_text = [x['label_ids'] for x in batch]
         padded_ids_text = pad_sequence(ids_text,
