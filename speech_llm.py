@@ -68,7 +68,7 @@ def ctc_reduce(hyp, blank_id: int = 0):
     return new_hyp
 
 
-class ProjectorCov1d(nn.Module):
+class ProjectorConv1d(nn.Module):
 
     def __init__(self, config, encoder_dim, llm_dim):
         super().__init__()
@@ -267,7 +267,7 @@ def init_model(model_args):
     else:
         encoder_dim = encoder.encoder.output_size()
     llm_dim = config.hidden_size
-    projector = ProjectorCov1d(model_args, encoder_dim, llm_dim)
+    projector = ProjectorConv1d(model_args, encoder_dim, llm_dim)
     total_params = sum(p.numel() for p in projector.parameters())
     print('Projector total params: {:.2f}M'.format(total_params / 1024 / 1024))
     model = SpeechLLM(llm_model, encoder, projector, config, model_args)
