@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Binbin Zhang(binbzha@qq.com)
 
 import math
-from typing import Optional
+from typing import List, Optional
 from dataclasses import dataclass, field
 
 import safetensors
@@ -148,6 +148,7 @@ class SpeechLLM(PreTrainedModel):
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def forward(
         self,
+        wav: List[str] = None,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -181,6 +182,7 @@ class SpeechLLM(PreTrainedModel):
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def generate(
         self,
+        wav: List[str] = None,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         mel: torch.LongTensor = None,
@@ -207,6 +209,7 @@ class SpeechLLM(PreTrainedModel):
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def decode_ctc(
         self,
+        wav: List[str] = None,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         mel: torch.LongTensor = None,

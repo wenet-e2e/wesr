@@ -118,6 +118,7 @@ class SpeechDataset(Dataset):
         ctc_ids = ctc_tokens['input_ids'][0]
         ctc_ids_len = ctc_tokens['attention_mask'].sum().item()
         ret = {
+            'wav': msg['wav'],
             'input_ids': input_ids,
             'attention_mask': attention_mask,
             'mel': mel,
