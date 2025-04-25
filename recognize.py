@@ -60,9 +60,9 @@ def main():
             text = tokenizer.batch_decode(generated_ids,
                                           skip_special_tokens=True)
             print(text)
-            for t in text:
+            for wav, t in zip(item['wav'], text):
                 t = t.replace('\n', ' ')
-                fid.write(t + '\n')
+                fid.write(wav + ' ' + t + '\n')
             sys.stdout.flush()
     fid.close()
 
