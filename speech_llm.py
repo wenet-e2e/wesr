@@ -1,5 +1,6 @@
 # Copyright (c) 2025 Binbin Zhang(binbzha@qq.com)
 
+import logging
 import math
 from typing import Optional
 from dataclasses import dataclass, field
@@ -33,8 +34,6 @@ class ModelArguments:
     )
     max_speech_seconds: int = 30
     frames_per_second: int = 100
-    # CTC related, if ctc_weight > 0, CTC loss is applied in training.
-    ctc_weight: Optional[float] = field(default=0.0)
     # For decode
     decode_instruction: Optional[str] = field(default="")
 
@@ -54,18 +53,6 @@ class ModelArguments:
     @property
     def max_mel_size(self):
         return self.max_speech_seconds * self.frames_per_second
-
-
-def ctc_reduce(hyp, blank_id: int = 0):
-    new_hyp = []
-    cur = 0
-    while cur < len(hyp):
-        if hyp[cur] != blank_id:
-            new_hyp.append(hyp[cur])
-        prev = cur
-        while cur < len(hyp) and hyp[cur] == hyp[prev]:
-            cur += 1
-    return new_hyp
 
 
 class ProjectorCov1d(nn.Module):
@@ -120,30 +107,16 @@ class SpeechLLM(PreTrainedModel):
             self._keys_to_ignore_on_save.add('llm.' + k)
         for k in self.encoder.state_dict().keys():
             self._keys_to_ignore_on_save.add('encoder.' + k)
-        # Use bos_token_id as CTC blank id
-        self.ctc_loss = nn.CTCLoss(config.bos_token_id,
-                                   reduction='mean',
-                                   zero_infinity=True)
-        self.blank_id = config.bos_token_id
         self.model_args = model_args
+        self.num_setences = 0
 
-    def get_speech_embeddings(self, mel, mel_len):
-        max_speech_size = self.model_args.max_speech_token_size
-        if self.model_args.encoder_type == 'whisper':
-            speech_emb = self.encoder.embed_audio(mel)  # (b, n_mel, 1500)
-            speech_proj = self.projector(speech_emb)
-        else:
-            mel = mel.transpose(1, 2)
-            # mask (B, 1, T)
-            speech_emb, mask = self.encoder._forward_encoder(mel, mel_len)
-            speech_emb = speech_emb.masked_fill(~mask.transpose(1, 2), 0.0)
-            # Note: The downsampling strategy in wenet discards frames that
-            # are not enough for an output, so we need to pad the output to
-            # a fixed length.
-            speech_proj = self.projector(speech_emb)
-            pad_size = max_speech_size - speech_proj.size(1)
-            speech_proj = F.pad(speech_proj, (0, 0, 0, pad_size), value=0.0)
-        return speech_proj
+    def get_speech_embeddings(self, audio_features, audio_feature_lengths):
+        speech_emb, mask = self.encoder._forward_encoder(
+            audio_features, audio_feature_lengths)
+        speech_emb = speech_emb.masked_fill(~mask.transpose(1, 2), 0.0)
+        speech_proj = self.projector(speech_emb)
+        speech_proj_lens = mask.squeeze(1).sum(1) // self.projector.k
+        return speech_proj, speech_proj_lens
 
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def forward(
@@ -151,31 +124,34 @@ class SpeechLLM(PreTrainedModel):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
-        mel: torch.LongTensor = None,
-        mel_len: torch.LongTensor = None,
-        ctc_ids: torch.LongTensor = None,
-        ctc_ids_len: torch.LongTensor = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        audio_offsets: Optional[torch.LongTensor] = None,
+        audio_features: Optional[torch.FloatTensor] = None,
+        audio_feature_lengths: Optional[torch.LongTensor] = None,
     ):
-        max_speech_size = self.model_args.max_speech_token_size
         text_emb = self.llm.get_input_embeddings()(input_ids)
-        speech_emb = self.get_speech_embeddings(mel, mel_len)
-        inputs_embeds = torch.cat(
-            (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
-        out = self.llm(inputs_embeds=inputs_embeds,
-                       attention_mask=attention_mask,
-                       labels=labels)
-        ctc_weight = self.model_args.ctc_weight
-        if ctc_weight > 0:
-            # Tie CTC linear transforme and input embedding weight
-            ctc_linear = self.llm.get_input_embeddings().weight
-            ctc_act = torch.matmul(speech_emb, ctc_linear.T)
-            ctc_act = ctc_act.transpose(0, 1)
-            ctc_prob = ctc_act.log_softmax(2)
-            prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
-            with torch.cuda.amp.autocast(enabled=False):
-                closs = self.ctc_loss(ctc_prob.float(), ctc_ids, prob_len,
-                                      ctc_ids_len)
-            out.loss = (1 - ctc_weight) * out.loss + ctc_weight * closs
+        speech_emb, speech_emb_lens = self.get_speech_embeddings(
+            audio_features, audio_feature_lengths)
+        inputs_embeds = text_emb
+        if audio_offsets is None:  # batch
+            batch_size = input_ids.size(0)
+            for i in range(batch_size):
+                inputs_embeds[i, :speech_emb_lens[i], :] = speech_emb[
+                    i, :speech_emb_lens[i], :]
+            out = self.llm(inputs_embeds=inputs_embeds,
+                           attention_mask=attention_mask,
+                           labels=labels)
+            self.num_setences += batch_size
+        else:
+            batch_size = audio_offsets.size(0)
+            for i in range(batch_size):
+                s, e = audio_offsets[i], audio_offsets[i] + speech_emb_lens[i]
+                inputs_embeds[s:e, :] = speech_emb[i, :speech_emb_lens[i], :]
+            out = self.llm(inputs_embeds=inputs_embeds.unsqueeze(0),
+                           position_ids=position_ids.unsqueeze(0),
+                           labels=labels.unsqueeze(0))
+            self.num_setences += batch_size
+        logging.info('Train finish {} sentences'.format(self.num_setences))
         return out
 
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -203,30 +179,6 @@ class SpeechLLM(PreTrainedModel):
             eos_token_id=eos_token_id,
         )
         return model_outputs
-
-    @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-    def decode_ctc(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        mel: torch.LongTensor = None,
-        mel_len: torch.LongTensor = None,
-        eos_token_id=None,
-        decode_config=None,
-    ):
-        speech_emb = self.get_speech_embeddings(mel, mel_len)
-        # Tie CTC linear transforme and input embedding weight
-        ctc_linear = self.llm.get_input_embeddings().weight
-        ctc_act = torch.matmul(speech_emb, ctc_linear.T)
-        ctc_probs = ctc_act.log_softmax(2)
-        prob_len = torch.ceil(mel_len / self.model_args.ds_rate).long()
-        batch_size = ctc_probs.size(0)
-        results = []
-        for i in range(batch_size):
-            top1 = ctc_probs[i][:prob_len[i], :].argmax(dim=1)
-            hyp = ctc_reduce(top1.tolist(), self.blank_id)
-            results.append(hyp)
-        return results
 
     def enable_input_require_grads(self):
         self.llm.enable_input_require_grads()
@@ -261,6 +213,7 @@ def init_model(model_args):
         model_args.llm_model_name_or_path,
         config=config,
         torch_dtype='auto',
+        attn_implementation="flash_attention_2",
     )
     if model_args.encoder_type == "whisper":
         encoder_dim = encoder.dims.n_audio_state
