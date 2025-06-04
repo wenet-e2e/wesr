@@ -128,6 +128,7 @@ class SpeechLLM(PreTrainedModel):
         audio_offsets: Optional[torch.LongTensor] = None,
         audio_features: Optional[torch.FloatTensor] = None,
         audio_feature_lengths: Optional[torch.LongTensor] = None,
+        **kwargs,
     ):
         text_emb = self.llm.get_input_embeddings()(input_ids)
         speech_emb, speech_emb_lens = self.get_speech_embeddings(
@@ -147,9 +148,12 @@ class SpeechLLM(PreTrainedModel):
             for i in range(batch_size):
                 s, e = audio_offsets[i], audio_offsets[i] + speech_emb_lens[i]
                 inputs_embeds[s:e, :] = speech_emb[i, :speech_emb_lens[i], :]
-            out = self.llm(inputs_embeds=inputs_embeds.unsqueeze(0),
-                           position_ids=position_ids.unsqueeze(0),
-                           labels=labels.unsqueeze(0))
+            out = self.llm(
+                inputs_embeds=inputs_embeds.unsqueeze(0),
+                position_ids=position_ids.unsqueeze(0),
+                labels=labels.unsqueeze(0),
+                **kwargs,
+            )
             self.num_setences += batch_size
         logging.info('Train finish {} sentences'.format(self.num_setences))
         return out
@@ -159,16 +163,20 @@ class SpeechLLM(PreTrainedModel):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        mel: torch.LongTensor = None,
-        mel_len: torch.LongTensor = None,
+        labels: Optional[torch.LongTensor] = None,
+        audio_features: Optional[torch.FloatTensor] = None,
+        audio_feature_lengths: Optional[torch.LongTensor] = None,
         eos_token_id=None,
         decode_config=None,
     ):
-        max_speech_size = self.model_args.max_speech_token_size
+        batch_size = input_ids.size(0)
         text_emb = self.llm.get_input_embeddings()(input_ids)
-        speech_emb = self.get_speech_embeddings(mel, mel_len)
-        inputs_embeds = torch.cat(
-            (speech_emb, text_emb[:, max_speech_size:, :]), dim=1)
+        speech_emb, speech_emb_lens = self.get_speech_embeddings(
+            audio_features, audio_feature_lengths)
+        inputs_embeds = text_emb
+        for i in range(batch_size):
+            inputs_embeds[i, :speech_emb_lens[i], :] = speech_emb[
+                i, :speech_emb_lens[i], :]
         model_outputs = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,

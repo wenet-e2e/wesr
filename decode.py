@@ -16,10 +16,8 @@ from speech_llm import init_model, ModelArguments
 @dataclass
 class DecodeArguments:
     llm_type: str = 'qwen2'
-    decode_type: str = 'llm'
     max_new_tokens: int = 50
     num_beams: int = 1
-    batch_size: int = 1
     result_path: str = field(default=None, metadata={"help": "Path to result"})
 
 
@@ -30,6 +28,7 @@ def main():
     model = init_model(model_args)
     tokenizer = AutoTokenizer.from_pretrained(model_args.llm_model_name_or_path)
     if decode_args.llm_type == 'qwen2':
+        tokenizer.bos_token = tokenizer.eos_token
         eos_token_id = tokenizer.convert_tokens_to_ids(
             ['<|endoftext|>', '<|im_end|>'])
     else:
@@ -37,26 +36,19 @@ def main():
         eos_token_id = tokenizer.convert_tokens_to_ids(
             ['<|end_of_text|>', '<|eot_id|>'])
     print('eos_token_id', eos_token_id)
-    test_dataset = SpeechDataset(data_args.data_path,
-                                 tokenizer,
-                                 model_args,
-                                 inference=True)
-    data_loader = DataLoader(test_dataset, batch_size=decode_args.batch_size)
+    test_dataset = SpeechDataset(tokenizer, data_args, inference=True)
+    data_loader = DataLoader(test_dataset, collate_fn=lambda x: x[0])
     if torch.cuda.is_available():
         model = model.cuda()
     accelerator = Accelerator()
     model, data_loader = accelerator.prepare(model, data_loader)
     model.eval()
     fid = open(decode_args.result_path, 'w', encoding='utf8')
-    if decode_args.decode_type == 'llm':
-        decode_func = model.generate
-    else:
-        decode_func = model.decode_ctc
     with torch.no_grad():
-        for item in tqdm(data_loader):
-            generated_ids = decode_func(**item,
-                                        eos_token_id=eos_token_id,
-                                        decode_config=decode_args)
+        for i, item in enumerate(tqdm(data_loader)):
+            generated_ids = model.generate(**item,
+                                           eos_token_id=eos_token_id,
+                                           decode_config=decode_args)
             text = tokenizer.batch_decode(generated_ids,
                                           skip_special_tokens=True)
             print(text)

@@ -6,8 +6,11 @@ import logging
 import os
 import pathlib
 from dataclasses import dataclass, field
+from typing import Union, Any
 
+import numpy as np
 import torch
+import torch.nn as nn
 import transformers
 from transformers import AutoTokenizer, Trainer
 from transformers import TrainerCallback
@@ -19,6 +22,45 @@ from speech_llm import init_model, ModelArguments
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adafactor")
+
+
+class MyTrainer(Trainer):
+
+    def training_step(self,
+                      model: nn.Module,
+                      inputs: dict[str, Union[torch.Tensor, Any]],
+                      num_items_in_batch=None) -> torch.Tensor:
+        model.train()
+        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+            self.optimizer.train()
+        inputs = self._prepare_inputs(inputs)
+        # loss compute will aplly `shift_labels`
+        # See https://github.com/huggingface/transformers/blob/v4.52.2/src/transformers/trainer.py#L3825
+        with self.compute_loss_context_manager():
+            loss, outputs = self.compute_loss(model,
+                                              inputs,
+                                              return_outputs=True)
+        # Compute accuracy (ignoring ignore_index)
+        if "labels" in inputs:
+            logits = outputs.logits[..., :-1, :].contiguous()
+            labels = inputs["labels"][..., 1:].contiguous()
+            preds = torch.argmax(logits, dim=-1)
+            mask = labels != -100
+            correct = (preds == labels) & mask
+            accuracy = correct.sum().item() / mask.sum().item()
+            interval = self.args.logging_steps * self.args.gradient_accumulation_steps
+            if self.state.global_step % interval == 0:
+                self.log({
+                    "train_loss": loss.detach().cpu().item(),
+                    "train_accuracy": accuracy
+                })
+
+        if self.args.n_gpu > 1:
+            loss = loss.mean()
+        loss = loss / self.args.gradient_accumulation_steps
+
+        self.accelerator.backward(loss)
+        return loss.detach()
 
 
 class ProfilerCallback(TrainerCallback):
@@ -34,7 +76,7 @@ class ProfilerCallback(TrainerCallback):
 
         if not self.started:
             self.profiler = torch.profiler.profile(
-                schedule=torch.profiler.schedule(wait=9,
+                schedule=torch.profiler.schedule(wait=99,
                                                  warmup=0,
                                                  active=1,
                                                  repeat=0,
@@ -83,24 +125,20 @@ def main():
         model_max_length=model_args.model_max_length,
         padding_side="right",
     )
-    if 'llama' in model_args.llm_model_name_or_path:
+
+    if 'Qwen' in model_args.llm_model_name_or_path:
+        tokenizer.bos_token = tokenizer.eos_token
+    elif 'llama' in model_args.llm_model_name_or_path:
         tokenizer.pad_token = '<|finetune_right_pad_id|>'
 
     print("Loading data...")
-    train_dataset = SpeechDataset(data_args.data_path, tokenizer, model_args)
-    if data_args.eval_data_path:
-        eval_dataset = SpeechDataset(data_args.eval_data_path, tokenizer,
-                                     model_args)
-    else:
-        eval_dataset = None
+    train_dataset = SpeechDataset(tokenizer, data_args)
     # Start trainer
-    print(training_args.logging_dir)
-    trainer = Trainer(
+    trainer = MyTrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
         data_collator=lambda x: x[0],
         callbacks=[ProfilerCallback(log_dir=training_args.logging_dir)],
     )
