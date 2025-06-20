@@ -1,6 +1,6 @@
-# WeST
+# WeSR
 
-**We** **S**peech **T**ranscript, LLM based Speech Recognition/Transcript in 300 lines of code.
+**We** **S**peech **R**ecognition, LLM based Speech Recognition/Transcript in 300 lines of code.
 
 ## Details
 Motivated by [SLAM-ASR](https://arxiv.org/abs/2402.08846) and [LLaMA 3.1](https://arxiv.org/abs/2407.21783),
